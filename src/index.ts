@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import axios from 'axios';
 import { TokenManager } from './auth/tokenManager';
 import { ConnectorFactory } from './connectors';
 import { AnalyticsAggregator } from './analytics/aggregator';
@@ -165,10 +166,18 @@ app.get('/', (req, res) => {
                         <a href="/twitter/dashboard" class="btn">Twitter Dashboard</a>
                     </div>
                     
+                    ${configuredPlatforms.includes('facebook') ? `
+                        <div class="card">
+                            <h3>📘 Facebook Analytics</h3>
+                            <p>View your Facebook pages, posts, and engagement data</p>
+                            <a href="/facebook/dashboard" class="btn">Facebook Dashboard</a>
+                        </div>
+                    ` : ''}
+                    
                     <div class="card">
-                        <h3>📘 Facebook Analytics</h3>
-                        <p>View your Facebook pages, posts, and engagement data</p>
-                        <a href="/facebook/dashboard" class="btn">Facebook Dashboard</a>
+                        <h3>🔶 Reddit Analytics</h3>
+                        <p>View your Reddit posts, karma, and subreddit engagement</p>
+                        <a href="/reddit/dashboard" class="btn">Reddit Dashboard</a>
                     </div>
                     
                     <div class="card">
@@ -211,12 +220,20 @@ app.get('/', (req, res) => {
                         }
                     </div>
                     
-                    <div class="status-card" style="background: linear-gradient(135deg, #4267B2 0%, #365899 100%);">
-                        <h4>📘 Facebook Status</h4>
-                        <h2>${configuredPlatforms.includes('facebook') ? 'Connected' : 'Not Connected'}</h2>
-                        ${configuredPlatforms.includes('facebook') ? 
-                          '<p>✅ Ready to fetch your pages</p>' : 
-                          '<p>Add Facebook API credentials to .env</p>'
+                    ${configuredPlatforms.includes('facebook') ? `
+                        <div class="status-card" style="background: linear-gradient(135deg, #4267B2 0%, #365899 100%);">
+                            <h4>📘 Facebook Status</h4>
+                            <h2>Connected</h2>
+                            <p>✅ Ready to fetch your pages</p>
+                        </div>
+                    ` : ''}
+                    
+                    <div class="status-card" style="background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);">
+                        <h4>🔶 Reddit Status</h4>
+                        <h2>${configuredPlatforms.includes('reddit') ? 'Connected' : 'Not Connected'}</h2>
+                        ${configuredPlatforms.includes('reddit') ? 
+                          '<p>✅ Ready to fetch your posts</p>' : 
+                          '<p>Add Reddit API credentials to .env</p>'
                         }
                     </div>
                 </div>
@@ -1341,18 +1358,941 @@ app.get('/facebook/posts', async (req, res) => {
   }
 });
 
+// Reddit OAuth Initiation
+app.get('/auth/reddit', (req, res) => {
+  const credentials = tokenManager.getCredentials('reddit');
+  
+  if (!credentials?.client_id) {
+    return res.redirect('/reddit/dashboard?error=missing_credentials');
+  }
+
+  const state = Math.random().toString(36).substring(2, 15);
+  const scope = 'identity read history submit'; // Reddit scopes
+  const redirectUri = process.env.REDDIT_REDIRECT_URI || 'http://127.0.0.1:3002/auth/reddit/callback';
+  
+  const authUrl = `https://www.reddit.com/api/v1/authorize?` + 
+    `client_id=${credentials.client_id}&` +
+    `response_type=code&` +
+    `state=${state}&` +
+    `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+    `duration=permanent&` +
+    `scope=${encodeURIComponent(scope)}`;
+
+  // Store state for verification (in production, use Redis or database)
+  (req as any).session = (req as any).session || {};
+  (req as any).session.reddit_state = state;
+
+  res.redirect(authUrl);
+});
+
+// Reddit OAuth Callback
+app.get('/auth/reddit/callback', async (req, res) => {
+  const code = req.query.code as string;
+  const state = req.query.state as string;
+  const error = req.query.error as string;
+
+  if (error) {
+    return res.redirect('/reddit/dashboard?error=' + encodeURIComponent(error));
+  }
+
+  if (!code) {
+    return res.redirect('/reddit/dashboard?error=no_code');
+  }
+
+  // Exchange code for access token
+  try {
+    console.log('🔄 Reddit OAuth callback received:', { code: code ? '***' : null, state, error });
+    
+    const credentials = tokenManager.getCredentials('reddit');
+    if (!credentials?.client_id || !credentials?.client_secret) {
+      console.error('❌ Missing Reddit credentials');
+      return res.redirect('/reddit/dashboard?error=missing_credentials');
+    }
+
+    const redirectUri = process.env.REDDIT_REDIRECT_URI || 'http://127.0.0.1:3002/auth/reddit/callback';
+    console.log('📍 Using redirect URI:', redirectUri);
+    
+    const requestBody = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code,
+      redirect_uri: redirectUri
+    });
+    
+    console.log('📤 Making token exchange request to Reddit...');
+    
+    // Exchange authorization code for access token with timeout and retry
+    let tokenResponse: Response | null = null;
+    let retryCount = 0;
+    const maxRetries = 2;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        console.log(`🔄 Attempt ${retryCount + 1}/${maxRetries + 1} - Requesting token from Reddit...`);
+        
+        // Use curl via child_process to bypass Node.js HTTP issues
+        const { spawn } = require('child_process');
+        const curlResult = await new Promise<{status: number, data: string}>((resolve, reject) => {
+          const auth = Buffer.from(`${credentials.client_id}:${credentials.client_secret}`).toString('base64');
+          
+          const curlArgs = [
+            '-X', 'POST',
+            'https://www.reddit.com/api/v1/access_token',
+            '-H', `Authorization: Basic ${auth}`,
+            '-H', 'Content-Type: application/x-www-form-urlencoded',
+            '-H', 'User-Agent: InfluenceHub/1.0 by Ok-Plastic8512',
+            '-d', requestBody.toString(),
+            '--connect-timeout', '15',
+            '--max-time', '30',
+            '--write-out', '%{http_code}',
+            '--silent'
+          ];
+          
+          console.log('🔧 Using curl for Reddit API request...');
+          const curl = spawn('curl', curlArgs);
+          
+          let output = '';
+          let statusCode = '';
+          
+          curl.stdout.on('data', (data: any) => {
+            output += data.toString();
+          });
+          
+          curl.stderr.on('data', (data: any) => {
+            console.error('Curl stderr:', data.toString());
+          });
+          
+          curl.on('close', (code: any) => {
+            if (code === 0) {
+              // Extract status code from end of output
+              const lastThreeChars = output.slice(-3);
+              const httpCode = parseInt(lastThreeChars);
+              const responseBody = output.slice(0, -3);
+              
+              resolve({
+                status: httpCode || 0,
+                data: responseBody
+              });
+            } else {
+              reject(new Error(`Curl failed with code ${code}`));
+            }
+          });
+        });
+        
+        // Convert curl result to fetch-like response object
+        tokenResponse = {
+          ok: curlResult.status >= 200 && curlResult.status < 300,
+          status: curlResult.status,
+          statusText: curlResult.status >= 200 && curlResult.status < 300 ? 'OK' : 'Error',
+          json: async () => {
+            try {
+              return JSON.parse(curlResult.data);
+            } catch {
+              return { error: 'Invalid JSON response', raw: curlResult.data };
+            }
+          },
+          text: async () => curlResult.data
+        } as Response;
+        
+        console.log('✅ Reddit API responded successfully');
+        break;
+        
+      } catch (error: any) {
+        retryCount++;
+        console.log(`❌ Attempt ${retryCount} failed:`, error.message);
+        
+        if (retryCount > maxRetries) {
+          console.error('💥 All retry attempts failed');
+          throw error;
+        }
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+
+    if (!tokenResponse) {
+      console.error('❌ No response received from Reddit API');
+      return res.redirect('/reddit/dashboard?error=no_response');
+    }
+
+    console.log('📥 Token response status:', tokenResponse.status, tokenResponse.statusText);
+    
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error('❌ Reddit API returned error:', errorText);
+      return res.redirect('/reddit/dashboard?error=api_error');
+    }
+
+    const tokenData = await tokenResponse.json() as any;
+    console.log('📋 Token data received:', { 
+      hasAccessToken: !!tokenData.access_token, 
+      tokenType: tokenData.token_type,
+      error: tokenData.error,
+      errorDescription: tokenData.error_description 
+    });
+    
+    if (tokenData.access_token) {
+      // Store access token (in production, use secure storage)
+      console.log('✅ Reddit OAuth successful! Storing access token...');
+      
+      // Store the access token in the credentials
+      const updatedCredentials = { ...credentials, access_token: tokenData.access_token };
+      tokenManager.setCredentials('reddit', updatedCredentials);
+      
+      res.redirect('/reddit/dashboard?success=oauth_complete');
+    } else {
+      console.error('❌ No access token in response:', tokenData);
+      res.redirect('/reddit/dashboard?error=token_exchange_failed');
+    }
+  } catch (error) {
+    console.error('💥 Reddit OAuth error:', error);
+    res.redirect('/reddit/dashboard?error=oauth_failed');
+  }
+});
+
+// Reddit Dashboard
+app.get('/reddit/dashboard', async (req, res) => {
+  const credentials = tokenManager.getCredentials('reddit');
+  
+  // Show OAuth login if we have app credentials but no access token
+  if (credentials?.client_id && credentials?.client_secret && !credentials?.access_token) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Reddit Login - Influence Hub</title>
+          <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { 
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                  background: #f8f9fa;
+                  min-height: 100vh;
+                  padding: 20px;
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+              }
+              .login-card {
+                  background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);
+                  color: white;
+                  padding: 60px;
+                  border-radius: 20px;
+                  text-align: center;
+                  max-width: 500px;
+                  box-shadow: 0 10px 30px rgba(255, 69, 0, 0.3);
+              }
+              .btn {
+                  background: white;
+                  color: #FF4500;
+                  padding: 15px 30px;
+                  border: none;
+                  border-radius: 25px;
+                  text-decoration: none;
+                  display: inline-block;
+                  margin: 15px;
+                  font-weight: 600;
+                  font-size: 1.1em;
+                  transition: transform 0.2s ease;
+              }
+              .btn:hover { transform: scale(1.05); }
+              .btn.secondary {
+                  background: transparent;
+                  color: white;
+                  border: 2px solid white;
+              }
+          </style>
+      </head>
+      <body>
+          <div class="login-card">
+              <h1>🔶 Connect to Reddit</h1>
+              <p style="margin: 20px 0; font-size: 1.2em;">Ready to access your Reddit analytics!</p>
+              <p style="margin-bottom: 30px; opacity: 0.9;">Click below to login with your Reddit account (Google login supported)</p>
+              
+              <div>
+                  <a href="/auth/reddit" class="btn">🚀 Connect Reddit Account</a>
+              </div>
+              
+              <div style="margin-top: 30px;">
+                  <a href="/" class="btn secondary">← Back to Home</a>
+              </div>
+          </div>
+      </body>
+      </html>
+    `);
+  }
+  
+  if (!credentials?.client_id || !credentials?.client_secret) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Reddit Setup - Influence Hub</title>
+          <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { 
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                  background: #f8f9fa;
+                  min-height: 100vh;
+                  padding: 20px;
+              }
+              .container { max-width: 800px; margin: 0 auto; }
+              .setup-card {
+                  background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);
+                  color: white;
+                  padding: 40px;
+                  border-radius: 15px;
+                  text-align: center;
+              }
+              .btn {
+                  background: white;
+                  color: #FF4500;
+                  padding: 12px 24px;
+                  border: none;
+                  border-radius: 25px;
+                  text-decoration: none;
+                  display: inline-block;
+                  margin: 10px;
+                  font-weight: 500;
+              }
+              .setup-steps {
+                  background: white;
+                  padding: 30px;
+                  border-radius: 15px;
+                  margin-top: 20px;
+              }
+              .step { margin-bottom: 20px; padding: 15px; border-left: 4px solid #FF4500; }
+              pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto; }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <div class="setup-card">
+                  <h1>🔶 Reddit Integration Setup</h1>
+                  <p>To access your Reddit posts and karma, please add your Reddit API credentials to the .env file.</p>
+                  <div style="margin-top: 20px;">
+                      <a href="/" class="btn">← Back to Home</a>
+                  </div>
+              </div>
+              
+              <div class="setup-steps">
+                  <h2>📋 Setup Steps</h2>
+                  
+                  <div class="step">
+                      <h3>1. Create Reddit App</h3>
+                      <p>Visit <a href="https://www.reddit.com/prefs/apps" target="_blank">Reddit Apps</a> and create a new application</p>
+                      <ul style="margin-top: 10px; margin-left: 20px;">
+                          <li>Choose <strong>"web app"</strong> for OAuth flow</li>
+                          <li>Or choose <strong>"script"</strong> for simpler username/password auth</li>
+                      </ul>
+                  </div>
+                  
+                  <div class="step">
+                      <h3>2. Set Redirect URI</h3>
+                      <p>If using "web app", set the redirect URI to:</p>
+                      <pre>http://127.0.0.1:3002/auth/reddit/callback</pre>
+                      <p>If using "script", use:</p>
+                      <pre>http://localhost:8080</pre>
+                  </div>
+                  
+                  <div class="step">
+                      <h3>3. Get App Credentials</h3>
+                      <p>Copy your Client ID (under the app name) and Client Secret</p>
+                  </div>
+                  
+                  <div class="step">
+                      <h3>4. Add to .env file</h3>
+                      <pre>REDDIT_CLIENT_ID=your_client_id
+REDDIT_CLIENT_SECRET=your_client_secret
+REDDIT_USERNAME=your_reddit_username
+REDDIT_PASSWORD=your_reddit_password</pre>
+                  </div>
+                  
+                  <div class="step">
+                      <h3>5. Restart Server</h3>
+                      <p>Restart the development server to load the new credentials</p>
+                  </div>
+                  
+                  <div class="step">
+                      <h3>⚠️ Security Note</h3>
+                      <p>This integration uses your Reddit username/password for authentication. Consider creating a dedicated account for API access.</p>
+                  </div>
+              </div>
+          </div>
+      </body>
+      </html>
+    `);
+  }
+
+  try {
+    const { RedditConnector } = require('./connectors/reddit');
+    const connector = new RedditConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    
+    const analyticsResult = await connector.fetchAnalytics('7');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Reddit Dashboard - Influence Hub</title>
+          <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { 
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                  background: #f8f9fa;
+                  min-height: 100vh;
+                  padding: 20px;
+              }
+              .container { max-width: 1200px; margin: 0 auto; }
+              .header {
+                  background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);
+                  color: white;
+                  padding: 30px;
+                  border-radius: 15px;
+                  margin-bottom: 30px;
+                  text-align: center;
+              }
+              .stats-grid {
+                  display: grid;
+                  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                  gap: 20px;
+                  margin-bottom: 30px;
+              }
+              .stat-card {
+                  background: white;
+                  padding: 25px;
+                  border-radius: 15px;
+                  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                  text-align: center;
+              }
+              .stat-number {
+                  font-size: 2.5em;
+                  font-weight: bold;
+                  color: #FF4500;
+                  display: block;
+              }
+              .post-grid {
+                  display: grid;
+                  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+                  gap: 20px;
+              }
+              .post-card {
+                  background: white;
+                  border-radius: 15px;
+                  padding: 20px;
+                  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                  border-left: 4px solid #FF4500;
+              }
+              .post-content {
+                  font-size: 1.1em;
+                  line-height: 1.5;
+                  margin-bottom: 15px;
+                  font-weight: 500;
+              }
+              .post-stats {
+                  display: flex;
+                  gap: 15px;
+                  font-size: 0.9em;
+                  color: #666;
+              }
+              .btn {
+                  background: white;
+                  color: #FF4500;
+                  padding: 12px 24px;
+                  border: none;
+                  border-radius: 25px;
+                  text-decoration: none;
+                  display: inline-block;
+                  margin: 10px;
+                  font-weight: 500;
+              }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <div class="header">
+                  <h1>🔶 Reddit Analytics</h1>
+                  <p>Your Reddit posts, karma, and engagement metrics</p>
+                  <div style="margin-top: 20px;">
+                      <a href="/reddit/posts" class="btn">View All Posts</a>
+                      <a href="/" class="btn">Home</a>
+                  </div>
+              </div>
+
+              ${analyticsResult.success && analyticsResult.data ? `
+                  <div class="stats-grid">
+                      <div class="stat-card">
+                          <span class="stat-number">${analyticsResult.data.metrics.likes || 0}</span>
+                          <h3>⬆️ Total Karma</h3>
+                          <p>Upvotes across posts</p>
+                      </div>
+                      
+                      <div class="stat-card">
+                          <span class="stat-number">${analyticsResult.data.posts?.length || 0}</span>
+                          <h3>📝 Recent Posts</h3>
+                          <p>Posts in timeframe</p>
+                      </div>
+                      
+                      <div class="stat-card">
+                          <span class="stat-number">${analyticsResult.data.metrics.comments || 0}</span>
+                          <h3>💬 Comments</h3>
+                          <p>Total comments</p>
+                      </div>
+                      
+                      <div class="stat-card">
+                          <span class="stat-number">${Math.round(analyticsResult.data.metrics.engagement_rate || 0)}</span>
+                          <h3>📊 Avg Engagement</h3>
+                          <p>Per post</p>
+                      </div>
+                  </div>
+                  
+                  <h2 style="margin-bottom: 20px;">📝 Recent Posts</h2>
+                  <div class="post-grid">
+                      ${analyticsResult.data.posts.slice(0, 6).map((post: any) => `
+                          <div class="post-card">
+                              <div class="post-content">${post.content}</div>
+                              <div class="post-stats">
+                                  <span>⬆️ ${post.metrics.likes}</span>
+                                  <span>💬 ${post.metrics.comments}</span>
+                                  <span>📅 ${new Date(post.timestamp).toLocaleDateString()}</span>
+                              </div>
+                          </div>
+                      `).join('')}
+                  </div>
+              ` : `
+                  <div style="text-align: center; padding: 60px; background: white; border-radius: 15px;">
+                      <h2>⚠️ Unable to Load Reddit Data</h2>
+                      <p>Error: ${analyticsResult.error || 'Unknown error'}</p>
+                      <p style="margin-top: 15px;">
+                          <a href="/reddit/dashboard" class="btn">Retry</a>
+                          <a href="/" class="btn">← Back to Home</a>
+                      </p>
+                  </div>
+              `}
+          </div>
+      </body>
+      </html>
+    `);
+    return;
+  } catch (error) {
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Reddit Dashboard Error</title></head>
+      <body>
+        <h1>Error loading Reddit dashboard</h1>
+        <p>${(error as Error).message}</p>
+        <a href="/">← Back to Home</a>
+      </body>
+      </html>
+    `);
+  }
+});
+
+// Reddit Posts Page
+app.get('/reddit/posts', async (req, res) => {
+  const credentials = tokenManager.getCredentials('reddit');
+  
+  if (!credentials?.client_id || !credentials?.client_secret) {
+    return res.redirect('/reddit/dashboard');
+  }
+
+  try {
+    const { RedditConnector } = require('./connectors/reddit');
+    const connector = new RedditConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    
+    const analyticsResult = await connector.fetchAnalytics('30');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>All Reddit Posts - Influence Hub</title>
+          <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { 
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                  background: #f8f9fa;
+                  min-height: 100vh;
+                  padding: 20px;
+              }
+              .container { max-width: 800px; margin: 0 auto; }
+              .header {
+                  background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);
+                  color: white;
+                  padding: 30px;
+                  border-radius: 15px;
+                  margin-bottom: 30px;
+                  text-align: center;
+              }
+              .post-card {
+                  background: white;
+                  border: 1px solid #e9ecef;
+                  border-radius: 15px;
+                  padding: 25px;
+                  margin-bottom: 20px;
+                  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                  border-left: 4px solid #FF4500;
+              }
+              .post-content {
+                  font-size: 1.2em;
+                  line-height: 1.5;
+                  margin-bottom: 20px;
+                  color: #333;
+                  font-weight: 500;
+              }
+              .post-stats {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: center;
+                  padding: 15px;
+                  background: #f8f9fa;
+                  border-radius: 10px;
+                  margin-bottom: 15px;
+              }
+              .btn {
+                  background: white;
+                  color: #FF4500;
+                  padding: 12px 24px;
+                  border: none;
+                  border-radius: 25px;
+                  text-decoration: none;
+                  display: inline-block;
+                  margin-right: 10px;
+              }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <div class="header">
+                  <h1>🔶 All Reddit Posts</h1>
+                  <p>Complete timeline with karma and engagement</p>
+                  <div style="margin-top: 20px;">
+                      <a href="/reddit/dashboard" class="btn">← Back to Dashboard</a>
+                      <a href="/" class="btn">Home</a>
+                  </div>
+              </div>
+
+              ${analyticsResult.success && analyticsResult.data?.posts && analyticsResult.data.posts.length > 0 ? `
+                  ${analyticsResult.data.posts.map((post: any) => `
+                      <div class="post-card">
+                          <div class="post-content">${post.content}</div>
+                          
+                          <div class="post-stats">
+                              <div>
+                                  <span>⬆️ ${post.metrics.likes} karma</span>
+                                  <span style="margin-left: 15px;">💬 ${post.metrics.comments} comments</span>
+                              </div>
+                              <div>
+                                  📅 ${new Date(post.timestamp).toLocaleDateString('en-US', { 
+                                      weekday: 'short', 
+                                      year: 'numeric', 
+                                      month: 'short', 
+                                      day: 'numeric',
+                                      hour: '2-digit',
+                                      minute: '2-digit'
+                                  })}
+                              </div>
+                          </div>
+                      </div>
+                  `).join('')}
+              ` : `
+                  <div style="text-align: center; padding: 60px 20px; background: white; border-radius: 15px; color: #6c757d;">
+                      <h2>📝 No Posts Found</h2>
+                      <p>No Reddit posts available or there was an issue loading your posts.</p>
+                      <p style="margin-top: 15px;">
+                          <a href="/reddit/dashboard" class="btn">← Back to Dashboard</a>
+                      </p>
+                  </div>
+              `}
+          </div>
+      </body>
+      </html>
+    `);
+    return;
+  } catch (error) {
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Reddit Posts Error</title></head>
+      <body>
+        <h1>Error loading Reddit posts</h1>
+        <p>${(error as Error).message}</p>
+        <a href="/reddit/dashboard">← Back to Reddit Dashboard</a>
+      </body>
+      </html>
+    `);
+  }
+});
+
 app.get('/metrics', async (req, res) => {
   try {
     const timeRange = (req.query.timeRange as string) || '7';
     const response = await aggregator.aggregateAllMetrics(timeRange);
     
-    if (response.success) {
-      res.json(response.data);
+    if (response.success && response.data) {
+      // Create beautiful analytics dashboard
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>📊 Analytics Dashboard - Influence Hub</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                    min-height: 100vh; padding: 20px;
+                }
+                .container { max-width: 1400px; margin: 0 auto; }
+                .header {
+                    text-align: center; background: rgba(255,255,255,0.95);
+                    padding: 30px; border-radius: 20px; margin-bottom: 30px;
+                    backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                }
+                .header h1 { font-size: 2.5rem; margin-bottom: 10px; color: #2d3748; }
+                .time-filter {
+                    margin: 20px 0; display: flex; justify-content: center; gap: 10px;
+                    flex-wrap: wrap;
+                }
+                .time-btn {
+                    padding: 8px 16px; background: #e53e3e; color: white;
+                    border: none; border-radius: 20px; cursor: pointer;
+                    text-decoration: none; transition: all 0.3s;
+                }
+                .time-btn:hover { background: #c53030; transform: translateY(-2px); }
+                .time-btn.active { background: #9b2c2c; }
+                .stats-overview {
+                    display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                    gap: 20px; margin-bottom: 30px;
+                }
+                .overview-card {
+                    background: rgba(255,255,255,0.95); border-radius: 15px;
+                    padding: 25px; backdrop-filter: blur(10px);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                    text-align: center; transition: transform 0.3s;
+                }
+                .overview-card:hover { transform: translateY(-5px); }
+                .overview-number {
+                    font-size: 2.5rem; font-weight: 700; color: #2d3748;
+                    margin-bottom: 10px;
+                }
+                .overview-label {
+                    font-size: 1rem; color: #718096; font-weight: 500;
+                }
+                .platforms-grid {
+                    display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+                    gap: 25px; margin-bottom: 30px;
+                }
+                .platform-card {
+                    background: rgba(255,255,255,0.95); border-radius: 15px;
+                    padding: 25px; backdrop-filter: blur(10px);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                }
+                .platform-header {
+                    display: flex; align-items: center; justify-content: space-between;
+                    margin-bottom: 20px;
+                }
+                .platform-title {
+                    font-size: 1.5rem; font-weight: 600; color: #2d3748;
+                    display: flex; align-items: center; gap: 10px;
+                }
+                .platform-status {
+                    padding: 4px 12px; border-radius: 12px; font-size: 0.8rem;
+                    font-weight: 500;
+                }
+                .status-connected { background: #c6f6d5; color: #22543d; }
+                .status-error { background: #fed7d7; color: #c53030; }
+                .platform-metrics {
+                    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                    gap: 15px;
+                }
+                .metric-box {
+                    text-align: center; padding: 15px; background: #f7fafc;
+                    border-radius: 10px;
+                }
+                .metric-number {
+                    font-size: 1.5rem; font-weight: 600; color: #2d3748;
+                }
+                .metric-label {
+                    font-size: 0.8rem; color: #718096; margin-top: 5px;
+                }
+                .nav-bar {
+                    display: flex; justify-content: center; gap: 15px;
+                    margin-bottom: 20px; flex-wrap: wrap;
+                }
+                .nav-btn {
+                    padding: 10px 20px; background: rgba(255,255,255,0.9);
+                    color: #4a5568; border: none; border-radius: 25px;
+                    text-decoration: none; transition: all 0.3s;
+                    font-weight: 500;
+                }
+                .nav-btn:hover {
+                    background: white; transform: translateY(-2px);
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                }
+                .no-data {
+                    text-align: center; padding: 60px; color: #718096;
+                    background: rgba(255,255,255,0.9); border-radius: 15px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>📊 Analytics Dashboard</h1>
+                    <p>Your social media performance at a glance</p>
+                    
+                    <div class="time-filter">
+                        <a href="/metrics?timeRange=1" class="time-btn ${timeRange === '1' ? 'active' : ''}">24h</a>
+                        <a href="/metrics?timeRange=7" class="time-btn ${timeRange === '7' ? 'active' : ''}">7 days</a>
+                        <a href="/metrics?timeRange=30" class="time-btn ${timeRange === '30' ? 'active' : ''}">30 days</a>
+                    </div>
+                    
+                    <div class="nav-bar">
+                        <a href="/" class="nav-btn">🏠 Home</a>
+                        <a href="/metrics" class="nav-btn">📊 Dashboard</a>
+                        <a href="/trends" class="nav-btn">🔥 Trends</a>
+                        <a href="/settings" class="nav-btn">⚙️ Settings</a>
+                    </div>
+                </div>
+
+                ${(() => {
+                  let totalFollowers = 0, totalPosts = 0, totalEngagement = 0;
+                  Object.values(response.data).forEach((platform: any) => {
+                    if (platform?.metrics) {
+                      totalFollowers += platform.metrics.followers || 0;
+                      totalPosts += platform.posts?.length || 0;
+                      totalEngagement += platform.metrics.likes || 0;
+                    }
+                  });
+
+                  return `
+                    <div class="stats-overview">
+                        <div class="overview-card">
+                            <div class="overview-number">${totalFollowers.toLocaleString()}</div>
+                            <div class="overview-label">Total Followers</div>
+                        </div>
+                        <div class="overview-card">
+                            <div class="overview-number">${totalPosts.toLocaleString()}</div>
+                            <div class="overview-label">Total Posts</div>
+                        </div>
+                        <div class="overview-card">
+                            <div class="overview-number">${totalEngagement.toLocaleString()}</div>
+                            <div class="overview-label">Total Engagement</div>
+                        </div>
+                        <div class="overview-card">
+                            <div class="overview-number">${Object.keys(response.data).length}</div>
+                            <div class="overview-label">Connected Platforms</div>
+                        </div>
+                    </div>
+                  `;
+                })()}
+
+                <div class="platforms-grid">
+                    ${Object.entries(response.data).map(([platform, data]: [string, any]) => {
+                      const platformEmojis: {[key: string]: string} = {
+                        youtube: '📺', twitter: '🐦', facebook: '📘', 
+                        reddit: '🔶', tiktok: '🎵', instagram: '📸'
+                      };
+                      
+                      const hasError = !data || data.error;
+                      
+                      return `
+                        <div class="platform-card">
+                            <div class="platform-header">
+                                <div class="platform-title">
+                                    ${platformEmojis[platform] || '📱'} ${platform.charAt(0).toUpperCase() + platform.slice(1)}
+                                </div>
+                                <div class="platform-status ${hasError ? 'status-error' : 'status-connected'}">
+                                    ${hasError ? 'Error' : 'Connected'}
+                                </div>
+                            </div>
+                            
+                            ${!hasError && data.metrics ? `
+                                <div class="platform-metrics">
+                                    <div class="metric-box">
+                                        <div class="metric-number">${(data.metrics.followers || 0).toLocaleString()}</div>
+                                        <div class="metric-label">Followers</div>
+                                    </div>
+                                    <div class="metric-box">
+                                        <div class="metric-number">${(data.metrics.likes || 0).toLocaleString()}</div>
+                                        <div class="metric-label">Likes</div>
+                                    </div>
+                                    <div class="metric-box">
+                                        <div class="metric-number">${(data.metrics.comments || 0).toLocaleString()}</div>
+                                        <div class="metric-label">Comments</div>
+                                    </div>
+                                    <div class="metric-box">
+                                        <div class="metric-number">${(data.metrics.shares || 0).toLocaleString()}</div>
+                                        <div class="metric-label">Shares</div>
+                                    </div>
+                                    <div class="metric-box">
+                                        <div class="metric-number">${(data.posts?.length || 0).toLocaleString()}</div>
+                                        <div class="metric-label">Posts</div>
+                                    </div>
+                                    <div class="metric-box">
+                                        <div class="metric-number">${(data.metrics.engagement_rate || 0).toFixed(1)}%</div>
+                                        <div class="metric-label">Engagement</div>
+                                    </div>
+                                </div>
+                            ` : `
+                                <div style="text-align: center; padding: 20px; color: #718096;">
+                                    ${hasError ? `❌ ${data.error || 'Failed to load data'}` : '📊 No data available'}
+                                </div>
+                            `}
+                        </div>
+                      `;
+                    }).join('')}
+                </div>
+
+                ${Object.keys(response.data).length === 0 ? `
+                    <div class="no-data">
+                        <h3>📊 No analytics data available</h3>
+                        <p>Connect your social media accounts to see your performance metrics!</p>
+                        <div style="margin-top: 20px;">
+                            <a href="/" class="nav-btn">🔗 Connect Accounts</a>
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        </body>
+        </html>
+      `);
     } else {
-      res.status(500).json({ error: response.error });
+      res.status(500).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Analytics Error</title></head>
+        <body style="font-family: system-ui; padding: 50px; text-align: center;">
+          <h1>🚨 Error Loading Analytics</h1>
+          <p>${response.error || 'Unknown error'}</p>
+          <a href="/" style="color: #007bff;">← Back to Home</a>
+        </body>
+        </html>
+      `);
     }
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Analytics Error</title></head>
+      <body style="font-family: system-ui; padding: 50px; text-align: center;">
+        <h1>💥 Server Error</h1>
+        <p>${(error as Error).message}</p>
+        <a href="/" style="color: #007bff;">← Back to Home</a>
+      </body>
+      </html>
+    `);
   }
 });
 
@@ -1361,14 +2301,403 @@ app.get('/trends', async (req, res) => {
     const timeRange = (req.query.timeRange as string) || '7';
     const response = await aggregator.getTrendingInsights(timeRange);
     
-    if (response.success) {
-      res.json(response.data);
+    if (response.success && response.data) {
+      // Create beautiful HTML interface for trends
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>🔥 Trending Insights - Influence Hub</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh; padding: 20px;
+                }
+                .container { max-width: 1200px; margin: 0 auto; }
+                .header {
+                    text-align: center; background: rgba(255,255,255,0.95);
+                    padding: 30px; border-radius: 20px; margin-bottom: 30px;
+                    backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                }
+                .header h1 { font-size: 2.5rem; margin-bottom: 10px; color: #2d3748; }
+                .time-filter {
+                    margin: 20px 0; display: flex; justify-content: center; gap: 10px;
+                    flex-wrap: wrap;
+                }
+                .time-btn {
+                    padding: 8px 16px; background: #4299e1; color: white;
+                    border: none; border-radius: 20px; cursor: pointer;
+                    text-decoration: none; transition: all 0.3s;
+                }
+                .time-btn:hover { background: #3182ce; transform: translateY(-2px); }
+                .time-btn.active { background: #2b6cb0; }
+                .trends-grid {
+                    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                    gap: 20px; margin-bottom: 30px;
+                }
+                .trend-card {
+                    background: rgba(255,255,255,0.95); border-radius: 15px;
+                    padding: 25px; backdrop-filter: blur(10px);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                    transition: transform 0.3s, box-shadow 0.3s;
+                }
+                .trend-card:hover {
+                    transform: translateY(-5px);
+                    box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+                }
+                .trend-topic {
+                    font-size: 1.2rem; font-weight: 600; color: #2d3748;
+                    margin-bottom: 15px; line-height: 1.4;
+                }
+                .trend-stats {
+                    display: flex; justify-content: space-between;
+                    flex-wrap: wrap; gap: 10px; margin-bottom: 15px;
+                }
+                .trend-stat {
+                    padding: 8px 12px; background: #edf2f7;
+                    border-radius: 8px; font-size: 0.9rem;
+                    display: flex; align-items: center; gap: 5px;
+                }
+                .trend-mentions { color: #e53e3e; }
+                .trend-growth { color: #38a169; }
+                .trend-sentiment { color: #3182ce; }
+                .trend-hashtags {
+                    display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
+                }
+                .hashtag {
+                    background: #bee3f8; color: #2b6cb0; padding: 4px 8px;
+                    border-radius: 12px; font-size: 0.8rem; font-weight: 500;
+                }
+                .platform-section {
+                    background: rgba(255,255,255,0.95); border-radius: 15px;
+                    padding: 25px; margin-bottom: 20px;
+                    backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                }
+                .platform-title {
+                    font-size: 1.5rem; font-weight: 600; margin-bottom: 20px;
+                    color: #2d3748; display: flex; align-items: center; gap: 10px;
+                }
+                .no-data {
+                    text-align: center; padding: 40px; color: #718096;
+                    background: rgba(255,255,255,0.9); border-radius: 15px;
+                }
+                .nav-bar {
+                    display: flex; justify-content: center; gap: 15px;
+                    margin-bottom: 20px; flex-wrap: wrap;
+                }
+                .nav-btn {
+                    padding: 10px 20px; background: rgba(255,255,255,0.9);
+                    color: #4a5568; border: none; border-radius: 25px;
+                    text-decoration: none; transition: all 0.3s;
+                    font-weight: 500;
+                }
+                .nav-btn:hover {
+                    background: white; transform: translateY(-2px);
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🔥 Trending Insights</h1>
+                    <p>Discover what's hot across your social media platforms</p>
+                    
+                    <div class="time-filter">
+                        <a href="/trends?timeRange=1" class="time-btn ${timeRange === '1' ? 'active' : ''}">24h</a>
+                        <a href="/trends?timeRange=7" class="time-btn ${timeRange === '7' ? 'active' : ''}">7 days</a>
+                        <a href="/trends?timeRange=30" class="time-btn ${timeRange === '30' ? 'active' : ''}">30 days</a>
+                    </div>
+                    
+                    <div class="nav-bar">
+                        <a href="/" class="nav-btn">🏠 Home</a>
+                        <a href="/dashboard" class="nav-btn">📊 Dashboard</a>
+                        <a href="/trends" class="nav-btn">🔥 Trends</a>
+                        <a href="/settings" class="nav-btn">⚙️ Settings</a>
+                    </div>
+                </div>
+
+                ${Object.entries(response.data).map(([platform, trends]) => {
+                  const platformEmojis: {[key: string]: string} = {
+                    youtube: '📺', twitter: '🐦', facebook: '📘', 
+                    reddit: '🔶', tiktok: '🎵', instagram: '📸'
+                  };
+                  
+                  return trends && Array.isArray(trends) && trends.length > 0 ? `
+                    <div class="platform-section">
+                        <div class="platform-title">
+                            ${platformEmojis[platform] || '📱'} ${platform.charAt(0).toUpperCase() + platform.slice(1)} Trends
+                        </div>
+                        <div class="trends-grid">
+                            ${trends.slice(0, 6).map((trend: any) => `
+                                <div class="trend-card">
+                                    <div class="trend-topic">${trend.topic}</div>
+                                    <div class="trend-stats">
+                                        <div class="trend-stat trend-mentions">
+                                            📈 ${trend.mentions?.toLocaleString() || 0} mentions
+                                        </div>
+                                        <div class="trend-stat trend-growth">
+                                            🚀 ${(trend.growth_rate || 0).toFixed(1)}% growth
+                                        </div>
+                                        <div class="trend-stat trend-sentiment">
+                                            ${trend.sentiment === 'positive' ? '😊' : trend.sentiment === 'negative' ? '😔' : '😐'} 
+                                            ${trend.sentiment}
+                                        </div>
+                                    </div>
+                                    ${trend.hashtags && trend.hashtags.length > 0 ? `
+                                        <div class="trend-hashtags">
+                                            ${trend.hashtags.slice(0, 5).map((tag: string) => 
+                                              `<span class="hashtag">#${tag}</span>`
+                                            ).join('')}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                  ` : '';
+                }).join('')}
+
+                ${Object.keys(response.data).length === 0 ? `
+                    <div class="no-data">
+                        <h3>📊 No trending data available</h3>
+                        <p>Connect your social media accounts to see trending insights!</p>
+                        <div style="margin-top: 20px;">
+                            <a href="/" class="nav-btn">🔗 Connect Accounts</a>
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        </body>
+        </html>
+      `);
     } else {
-      res.status(500).json({ error: response.error });
+      res.status(500).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Trends Error</title></head>
+        <body style="font-family: system-ui; padding: 50px; text-align: center;">
+          <h1>🚨 Error Loading Trends</h1>
+          <p>${response.error || 'Unknown error'}</p>
+          <a href="/" style="color: #007bff;">← Back to Home</a>
+        </body>
+        </html>
+      `);
     }
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Trends Error</title></head>
+      <body style="font-family: system-ui; padding: 50px; text-align: center;">
+        <h1>💥 Server Error</h1>
+        <p>${(error as Error).message}</p>
+        <a href="/" style="color: #007bff;">← Back to Home</a>
+      </body>
+      </html>
+    `);
   }
+});
+
+app.get('/dashboard', (req, res) => {
+  res.redirect('/metrics');
+});
+
+app.get('/settings', (req, res) => {
+  const configured = tokenManager.listConfiguredPlatforms();
+  const available = connectorFactory.getAvailablePlatforms();
+  const supported = connectorFactory.getSupportedPlatforms();
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>⚙️ Platform Settings - Influence Hub</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh; padding: 20px;
+            }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .header {
+                text-align: center; background: rgba(255,255,255,0.95);
+                padding: 30px; border-radius: 20px; margin-bottom: 30px;
+                backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            }
+            .header h1 { font-size: 2.5rem; margin-bottom: 10px; color: #2d3748; }
+            .nav-bar {
+                display: flex; justify-content: center; gap: 15px;
+                margin-bottom: 20px; flex-wrap: wrap;
+            }
+            .nav-btn {
+                padding: 10px 20px; background: rgba(255,255,255,0.9);
+                color: #4a5568; border: none; border-radius: 25px;
+                text-decoration: none; transition: all 0.3s;
+                font-weight: 500;
+            }
+            .nav-btn:hover {
+                background: white; transform: translateY(-2px);
+                box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            }
+            .platforms-section {
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+                gap: 25px; margin-bottom: 30px;
+            }
+            .platform-card {
+                background: rgba(255,255,255,0.95); border-radius: 15px;
+                padding: 25px; backdrop-filter: blur(10px);
+                box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+                transition: transform 0.3s;
+            }
+            .platform-card:hover { transform: translateY(-5px); }
+            .platform-header {
+                display: flex; align-items: center; justify-content: space-between;
+                margin-bottom: 20px;
+            }
+            .platform-title {
+                font-size: 1.5rem; font-weight: 600; color: #2d3748;
+                display: flex; align-items: center; gap: 10px;
+            }
+            .platform-status {
+                padding: 6px 12px; border-radius: 12px; font-size: 0.8rem;
+                font-weight: 500;
+            }
+            .status-connected { background: #c6f6d5; color: #22543d; }
+            .status-available { background: #bee3f8; color: #2b6cb0; }
+            .status-unavailable { background: #fed7d7; color: #c53030; }
+            .platform-actions {
+                display: flex; gap: 10px; flex-wrap: wrap;
+            }
+            .btn {
+                padding: 8px 16px; border-radius: 8px; text-decoration: none;
+                font-weight: 500; text-align: center; transition: all 0.3s;
+                border: none; cursor: pointer;
+            }
+            .btn-primary { background: #4299e1; color: white; }
+            .btn-primary:hover { background: #3182ce; }
+            .btn-success { background: #48bb78; color: white; }
+            .btn-success:hover { background: #38a169; }
+            .btn-danger { background: #f56565; color: white; }
+            .btn-danger:hover { background: #e53e3e; }
+            .btn-secondary { background: #e2e8f0; color: #4a5568; }
+            .btn-secondary:hover { background: #cbd5e0; }
+            .platform-info {
+                margin: 15px 0; padding: 15px; background: #f7fafc;
+                border-radius: 8px; font-size: 0.9rem; color: #4a5568;
+            }
+            .section-title {
+                font-size: 1.8rem; font-weight: 600; color: #2d3748;
+                margin: 30px 0 20px 0; text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>⚙️ Platform Settings</h1>
+                <p>Configure your social media platform connections</p>
+                
+                <div class="nav-bar">
+                    <a href="/" class="nav-btn">🏠 Home</a>
+                    <a href="/metrics" class="nav-btn">📊 Dashboard</a>
+                    <a href="/trends" class="nav-btn">🔥 Trends</a>
+                    <a href="/settings" class="nav-btn">⚙️ Settings</a>
+                </div>
+            </div>
+
+            <div class="section-title">✅ Connected Platforms</div>
+            <div class="platforms-section">
+                ${configured.length > 0 ? configured.map((platform: string) => {
+                  const platformEmojis: {[key: string]: string} = {
+                    youtube: '📺', twitter: '🐦', facebook: '📘', 
+                    reddit: '🔶', tiktok: '🎵', instagram: '📸'
+                  };
+                  
+                  return `
+                    <div class="platform-card">
+                        <div class="platform-header">
+                            <div class="platform-title">
+                                ${platformEmojis[platform] || '📱'} ${platform.charAt(0).toUpperCase() + platform.slice(1)}
+                            </div>
+                            <div class="platform-status status-connected">Connected</div>
+                        </div>
+                        <div class="platform-info">
+                            Platform is connected and ready to fetch analytics data.
+                        </div>
+                        <div class="platform-actions">
+                            <a href="/${platform}/dashboard" class="btn btn-success">View Dashboard</a>
+                            <button onclick="if(confirm('Remove ${platform} connection?')) window.location.href='/platforms/${platform}/remove'" class="btn btn-danger">Disconnect</button>
+                        </div>
+                    </div>
+                  `;
+                }).join('') : `
+                    <div class="platform-card">
+                        <div style="text-align: center; padding: 20px; color: #718096;">
+                            <h3>📱 No platforms connected</h3>
+                            <p>Connect your first social media platform below!</p>
+                        </div>
+                    </div>
+                `}
+            </div>
+
+            <div class="section-title">📱 Available Platforms</div>
+            <div class="platforms-section">
+                ${available.filter((platform: any) => !configured.includes(platform)).map((platform: any) => {
+                  const platformEmojis: {[key: string]: string} = {
+                    youtube: '📺', twitter: '🐦', facebook: '📘', 
+                    reddit: '🔶', tiktok: '🎵', instagram: '📸'
+                  };
+                  
+                  const isSupported = supported.includes(platform as any);
+                  
+                  return `
+                    <div class="platform-card">
+                        <div class="platform-header">
+                            <div class="platform-title">
+                                ${platformEmojis[platform] || '📱'} ${platform.charAt(0).toUpperCase() + platform.slice(1)}
+                            </div>
+                            <div class="platform-status ${isSupported ? 'status-available' : 'status-unavailable'}">
+                                ${isSupported ? 'Available' : 'Coming Soon'}
+                            </div>
+                        </div>
+                        <div class="platform-info">
+                            ${isSupported ? 
+                              `Ready to connect! Click setup to configure your ${platform} credentials.` :
+                              `Platform integration is in development and will be available soon.`
+                            }
+                        </div>
+                        <div class="platform-actions">
+                            ${isSupported ? `
+                                <a href="/${platform}/setup" class="btn btn-primary">Setup Connection</a>
+                            ` : `
+                                <button class="btn btn-secondary" disabled>Coming Soon</button>
+                            `}
+                        </div>
+                    </div>
+                  `;
+                }).join('')}
+            </div>
+
+            <div class="platform-card" style="margin-top: 30px; text-align: center;">
+                <h3 style="margin-bottom: 15px;">🔧 Advanced Settings</h3>
+                <div class="platform-actions" style="justify-content: center;">
+                    <a href="/selftest" class="btn btn-secondary">🔍 Run Self-Test</a>
+                    <a href="/status" class="btn btn-secondary">📊 Server Status</a>
+                    <button onclick="if(confirm('Clear all platform connections?')) alert('Feature coming soon!')" class="btn btn-danger">🗑️ Reset All</button>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+  `);
 });
 
 app.get('/platforms', (req, res) => {

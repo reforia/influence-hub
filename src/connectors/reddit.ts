@@ -38,8 +38,20 @@ export class RedditConnector extends BaseConnector {
   }
 
   private async getAccessToken(): Promise<string> {
+    // If we have a stored OAuth access token, use it
+    if (this.credentials.access_token) {
+      console.log('✅ Using stored OAuth access token for Reddit');
+      return this.credentials.access_token;
+    }
+
+    // Check if we have cached token that's still valid
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
+    }
+
+    // Fall back to username/password flow for legacy setups
+    if (!this.credentials.username || !this.credentials.password) {
+      throw new Error('No Reddit access token or username/password credentials available. Please complete OAuth flow.');
     }
 
     const auth = Buffer.from(`${this.credentials.client_id}:${this.credentials.client_secret}`).toString('base64');
@@ -50,7 +62,7 @@ export class RedditConnector extends BaseConnector {
       headers: {
         'Authorization': `Basic ${auth}`,
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+        'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
       },
       data: new URLSearchParams({
         grant_type: 'password',
@@ -78,7 +90,7 @@ export class RedditConnector extends BaseConnector {
         url: 'https://oauth.reddit.com/api/v1/me',
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+          'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
         }
       });
 
@@ -98,7 +110,7 @@ export class RedditConnector extends BaseConnector {
         url: 'https://oauth.reddit.com/api/v1/me',
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+          'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
         }
       });
 
@@ -111,7 +123,7 @@ export class RedditConnector extends BaseConnector {
         url: `https://oauth.reddit.com/user/${userResponse.data?.name}/submitted`,
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+          'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
         },
         params: {
           sort: 'new',
@@ -167,7 +179,7 @@ export class RedditConnector extends BaseConnector {
         url: 'https://oauth.reddit.com/r/all/hot',
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+          'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
         },
         params: {
           limit
@@ -205,7 +217,7 @@ export class RedditConnector extends BaseConnector {
         url,
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+          'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
         }
       });
 
@@ -233,7 +245,7 @@ export class RedditConnector extends BaseConnector {
         url,
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'InfluenceHub/1.0.0 by YourUsername'
+          'User-Agent': 'web:InfluenceHub:v1.0.0 (by /u/Ok-Plastic8512)'
         },
         params
       });

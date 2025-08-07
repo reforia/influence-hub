@@ -1,0 +1,6 @@
+HTTP/1.1 502 Bad Gateway
+Connection: keep-alive
+Keep-Alive: timeout=4
+Proxy-Connection: keep-alive
+Content-Length: 0
+
