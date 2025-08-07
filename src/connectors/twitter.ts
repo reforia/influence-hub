@@ -1,6 +1,6 @@
 import { BaseConnector } from './base';
-import { ApiResponse, AnalyticsData, PlatformCredentials, TrendData } from '@/types';
-import { RateLimiter } from '@/utils/rateLimiter';
+import { ApiResponse, AnalyticsData, PlatformCredentials, TrendData } from '../types';
+import { RateLimiter } from '../utils/rateLimiter';
 import { createHash, createHmac } from 'crypto';
 
 interface TwitterUser {
@@ -174,7 +174,7 @@ export class TwitterConnector extends BaseConnector {
     return totalEngagement;
   }
 
-  async searchTweets(query: string, maxResults = 100): Promise<ApiResponse<TwitterTweet[]>> {
+  async searchTweets(query: string, maxResults = 100): Promise<ApiResponse<{ data: TwitterTweet[] }>> {
     try {
       const response = await this.makeRequest<{ data: TwitterTweet[] }>({
         method: 'GET',

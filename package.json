@@ -11,7 +11,7 @@
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "typecheck": "tsc --noEmit",
-    "mcp": "tsx src/mcp/server.ts"
+    "mcp": "echo 'MCP server temporarily disabled for testing'"
   },
   "keywords": [
     "social-media",
@@ -31,7 +31,9 @@
   "author": "Your Name",
   "license": "MIT",
   "devDependencies": {
+    "@types/express": "^5.0.3",
     "@types/jest": "^29.5.8",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.10.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",

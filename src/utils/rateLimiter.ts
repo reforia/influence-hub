@@ -1,14 +1,14 @@
-import { RateLimitConfig } from '@/types';
+import { RateLimitConfig } from '../types';
+
+interface RateLimitState {
+  requests: number;
+  dailyRequests: number;
+  lastReset: Date;
+  lastDailyReset: Date;
+}
 
 export class RateLimiter {
   private limits: Map<string, RateLimitState> = new Map();
-
-  private interface RateLimitState {
-    requests: number;
-    dailyRequests: number;
-    lastReset: Date;
-    lastDailyReset: Date;
-  }
 
   public async checkLimit(platform: string, config: RateLimitConfig): Promise<boolean> {
     const now = new Date();

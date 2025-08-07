@@ -140,13 +140,13 @@ app.post('/platforms/:platform/configure', (req, res) => {
       aggregator.addConnector(platform, connector);
     }
 
-    res.json({ 
+    return res.json({ 
       success: true, 
       message: `${platform} configured successfully`,
       hash: tokenManager.hashCredentials(platform)
     });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    return res.status(500).json({ error: (error as Error).message });
   }
 });
 

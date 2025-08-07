@@ -1,6 +1,6 @@
 import { BaseConnector } from './base';
-import { ApiResponse, AnalyticsData, PlatformCredentials, TrendData } from '@/types';
-import { RateLimiter } from '@/utils/rateLimiter';
+import { ApiResponse, AnalyticsData, PlatformCredentials, TrendData } from '../types';
+import { RateLimiter } from '../utils/rateLimiter';
 
 interface RedditPost {
   id: string;

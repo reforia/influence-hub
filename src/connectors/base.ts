@@ -1,6 +1,6 @@
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
-import { ApiResponse, AnalyticsData, PlatformCredentials, RateLimitConfig, SupportedPlatform } from '@/types';
-import { RateLimiter } from '@/utils/rateLimiter';
+import { ApiResponse, AnalyticsData, PlatformCredentials, RateLimitConfig, SupportedPlatform } from '../types';
+import { RateLimiter } from '../utils/rateLimiter';
 
 export abstract class BaseConnector {
   protected platform: SupportedPlatform;
@@ -64,14 +64,19 @@ export abstract class BaseConnector {
         }
       };
     } catch (error: any) {
-      return {
+      const result: ApiResponse<T> = {
         success: false,
-        error: error.message || `API request failed for ${this.platform}`,
-        rate_limit: error.response?.status === 429 ? {
+        error: error.message || `API request failed for ${this.platform}`
+      };
+      
+      if (error.response?.status === 429) {
+        result.rate_limit = {
           remaining: 0,
           reset_time: new Date(Date.now() + 3600000)
-        } : undefined
-      };
+        };
+      }
+      
+      return result;
     }
   }
 

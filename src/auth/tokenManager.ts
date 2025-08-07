@@ -1,5 +1,5 @@
 import { createHash, createCipher, createDecipher } from 'crypto';
-import { PlatformCredentials, SupportedPlatform } from '@/types';
+import { PlatformCredentials, SupportedPlatform } from '../types';
 
 export class TokenManager {
   private readonly encryptionKey: string;

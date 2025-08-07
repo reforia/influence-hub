@@ -1,5 +1,5 @@
-import { AnalyticsData, TrendData, SupportedPlatform, ApiResponse } from '@/types';
-import { BaseConnector } from '@/connectors/base';
+import { AnalyticsData, TrendData, SupportedPlatform, ApiResponse } from '../types';
+import { BaseConnector } from '../connectors/base';
 
 export interface AggregatedMetrics {
   totalFollowers: number;
@@ -132,7 +132,7 @@ export class AnalyticsAggregator {
         try {
           const trendsResponse = await connector.fetchTrendingTopics(25);
           if (trendsResponse.success && trendsResponse.data) {
-            allTrends.push(...trendsResponse.data.map(trend => ({ ...trend, platform })));
+            allTrends.push(...trendsResponse.data.map((trend: TrendData) => ({ ...trend, platform })));
           }
 
           const analyticsResponse = await connector.fetchAnalytics(timeRange);
@@ -271,12 +271,16 @@ export class AnalyticsAggregator {
 
     if (trends.length > 0) {
       const topTrend = trends[0];
-      recommendations.push(`Consider creating content about "${topTrend.topic}" - it's currently trending`);
+      if (topTrend) {
+        recommendations.push(`Consider creating content about "${topTrend.topic}" - it's currently trending`);
+      }
     }
 
     if (posts.length > 0) {
       const bestPost = posts.sort((a, b) => b.engagementRate - a.engagementRate)[0];
-      recommendations.push(`Your "${bestPost.content.substring(0, 50)}..." post performed well - consider similar content`);
+      if (bestPost) {
+        recommendations.push(`Your "${bestPost.content.substring(0, 50)}..." post performed well - consider similar content`);
+      }
     }
 
     const hashtagTrends = trends.filter(t => t.hashtags && t.hashtags.length > 0);

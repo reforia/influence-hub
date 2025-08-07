@@ -7,10 +7,10 @@ import {
   McpError
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { TokenManager } from '@/auth/tokenManager';
-import { ConnectorFactory } from '@/connectors';
-import { AnalyticsAggregator } from '@/analytics/aggregator';
-import { SupportedPlatform, McpToolResult } from '@/types';
+import { TokenManager } from '../auth/tokenManager';
+import { ConnectorFactory } from '../connectors';
+import { AnalyticsAggregator } from '../analytics/aggregator';
+import { SupportedPlatform, McpToolResult } from '../types';
 import { z } from 'zod';
 
 const GetMetricsArgsSchema = z.object({

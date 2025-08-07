@@ -2,8 +2,8 @@ import { BaseConnector } from './base';
 import { YouTubeConnector } from './youtube';
 import { TwitterConnector } from './twitter';
 import { RedditConnector } from './reddit';
-import { PlatformCredentials, SupportedPlatform } from '@/types';
-import { RateLimiter } from '@/utils/rateLimiter';
+import { PlatformCredentials, SupportedPlatform } from '../types';
+import { RateLimiter } from '../utils/rateLimiter';
 
 export class ConnectorFactory {
   private rateLimiter: RateLimiter;
