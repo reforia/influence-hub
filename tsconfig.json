@@ -41,6 +41,6 @@
     "node_modules",
     "dist",
     "tests",
-    "src/mcp"
+    "src/mcp/server.ts"
   ]
 }

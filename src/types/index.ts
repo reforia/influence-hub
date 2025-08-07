@@ -7,7 +7,7 @@ export interface Platform {
 }
 
 export interface PlatformCredentials {
-  [key: string]: string;
+  [key: string]: string | undefined;
 }
 
 export interface RateLimitConfig {

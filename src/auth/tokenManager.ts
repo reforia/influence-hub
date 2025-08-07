@@ -28,7 +28,7 @@ export class TokenManager {
     const platforms: Record<SupportedPlatform, string[]> = {
       facebook: ['FACEBOOK_APP_ID', 'FACEBOOK_APP_SECRET', 'FACEBOOK_ACCESS_TOKEN'],
       youtube: ['YOUTUBE_API_KEY'],
-      twitter: ['TWITTER_API_KEY', 'TWITTER_API_SECRET', 'TWITTER_ACCESS_TOKEN', 'TWITTER_ACCESS_TOKEN_SECRET'],
+      twitter: ['TWITTER_API_KEY', 'TWITTER_API_SECRET', 'TWITTER_BEARER_TOKEN', 'TWITTER_ACCESS_TOKEN', 'TWITTER_ACCESS_TOKEN_SECRET'],
       reddit: ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USERNAME', 'REDDIT_PASSWORD'],
       tiktok: ['TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET'],
       instagram: ['INSTAGRAM_APP_ID', 'INSTAGRAM_APP_SECRET', 'INSTAGRAM_ACCESS_TOKEN'],
@@ -42,7 +42,8 @@ export class TokenManager {
       envVars.forEach(envVar => {
         const value = process.env[envVar];
         if (value) {
-          credentials[envVar.toLowerCase().replace(`${platform.toUpperCase()}_`, '')] = value;
+          const key = envVar.toLowerCase().replace(`${platform.toLowerCase()}_`, '');
+          credentials[key] = value;
           hasCredentials = true;
         }
       });
@@ -57,7 +58,9 @@ export class TokenManager {
     const encryptedCredentials: PlatformCredentials = {};
     
     Object.entries(credentials).forEach(([key, value]) => {
-      encryptedCredentials[key] = this.encrypt(value);
+      if (value !== undefined) {
+        encryptedCredentials[key] = this.encrypt(value);
+      }
     });
 
     this.tokens.set(platform, encryptedCredentials);
@@ -71,10 +74,12 @@ export class TokenManager {
 
     const credentials: PlatformCredentials = {};
     Object.entries(encryptedCredentials).forEach(([key, value]) => {
-      try {
-        credentials[key] = this.decrypt(value);
-      } catch (error) {
-        credentials[key] = value;
+      if (value !== undefined) {
+        try {
+          credentials[key] = this.decrypt(value);
+        } catch (error) {
+          credentials[key] = value;
+        }
       }
     });
 

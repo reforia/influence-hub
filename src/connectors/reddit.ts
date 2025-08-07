@@ -54,8 +54,8 @@ export class RedditConnector extends BaseConnector {
       },
       data: new URLSearchParams({
         grant_type: 'password',
-        username: this.credentials.username,
-        password: this.credentials.password
+        username: this.credentials.username || '',
+        password: this.credentials.password || ''
       }).toString()
     });
 

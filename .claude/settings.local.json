@@ -19,7 +19,11 @@
       "Bash(npm start)",
       "Bash(node:*)",
       "Bash(lsof:*)",
-      "Bash(npm run dev:*)"
+      "Bash(npm run dev:*)",
+      "Bash(chmod:*)",
+      "Bash(./start.sh:*)",
+      "Bash(timeout:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }

@@ -1,0 +1,30 @@
+{
+  "note": "MCP Server configuration for Claude Desktop - currently disabled due to ES module issues",
+  "mcpServers": {
+    "influence-hub": {
+      "comment": "Disabled until ES module compatibility is fixed",
+      "disabled": true,
+      "command": "node",
+      "args": ["dist/mcp/simple-server.js"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  },
+  "instructions": [
+    "The HTTP API server is running at http://127.0.0.1:3002",
+    "You can use curl or HTTP requests to access the data:",
+    "",
+    "Available endpoints:",
+    "- GET /selftest - Complete system diagnostics", 
+    "- GET /status - Platform connection status",
+    "- GET /metrics?timeRange=30 - Social media metrics",
+    "- GET /trends - Trending topics",
+    "- GET /platforms - Platform management",
+    "",
+    "Example to get YouTube data:",
+    "curl 'http://127.0.0.1:3002/metrics?timeRange=30'",
+    "",
+    "The startup script ./start.sh handles everything automatically"
+  ]
+}

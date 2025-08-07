@@ -1,6 +1,7 @@
 import { BaseConnector } from './base';
 import { YouTubeConnector } from './youtube';
 import { TwitterConnector } from './twitter';
+import { FacebookConnector } from './facebook';
 import { RedditConnector } from './reddit';
 import { PlatformCredentials, SupportedPlatform } from '../types';
 import { RateLimiter } from '../utils/rateLimiter';
@@ -23,10 +24,12 @@ export class ConnectorFactory {
       case 'twitter':
         return new TwitterConnector(credentials, this.rateLimiter);
       
+      case 'facebook':
+        return new FacebookConnector(credentials, this.rateLimiter);
+      
       case 'reddit':
         return new RedditConnector(credentials, this.rateLimiter);
       
-      case 'facebook':
       case 'tiktok':
       case 'instagram':
       case 'discord':
@@ -38,7 +41,7 @@ export class ConnectorFactory {
   }
 
   public getSupportedPlatforms(): SupportedPlatform[] {
-    return ['youtube', 'twitter', 'reddit'];
+    return ['youtube', 'twitter', 'facebook', 'reddit'];
   }
 
   public getAvailablePlatforms(): SupportedPlatform[] {
@@ -50,5 +53,6 @@ export {
   BaseConnector,
   YouTubeConnector,
   TwitterConnector,
+  FacebookConnector,
   RedditConnector
 };
