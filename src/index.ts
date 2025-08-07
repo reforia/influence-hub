@@ -27,6 +27,20 @@ function setupConnectors() {
         if (connector) {
           aggregator.addConnector(platform, connector);
           console.log(`✓ Connected to ${platform}`);
+          
+          // Test connection asynchronously after server starts
+          setTimeout(async () => {
+            try {
+              const isValid = await connector.testConnection();
+              if (isValid) {
+                console.log(`✅ ${platform} API validation successful`);
+              } else {
+                console.warn(`⚠️ ${platform} API validation failed`);
+              }
+            } catch (error) {
+              console.warn(`⚠️ ${platform} API test error:`, (error as Error).message);
+            }
+          }, 1000);
         }
       } catch (error) {
         console.warn(`⚠ Failed to setup connector for ${platform}:`, (error as Error).message);
@@ -168,7 +182,7 @@ app.delete('/platforms/:platform', (req, res) => {
 
 setupConnectors();
 
-app.listen(port, () => {
+const server = app.listen(port, '127.0.0.1', () => {
   console.log(`
 🚀 Influence Hub Server Running
 
@@ -188,6 +202,23 @@ Available Endpoints:
 
 📖 See README.md for setup instructions
   `);
+});
+
+server.on('error', (error: any) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${port} is already in use`);
+    process.exit(1);
+  } else {
+    console.error('❌ Server error:', error);
+  }
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection:', reason);
 });
 
 export { app, tokenManager, aggregator, connectorFactory };

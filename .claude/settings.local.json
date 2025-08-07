@@ -14,7 +14,12 @@
       "Bash(npm install:*)",
       "Bash(npm run build:*)",
       "Bash(find:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(pkill:*)",
+      "Bash(npm start)",
+      "Bash(node:*)",
+      "Bash(lsof:*)",
+      "Bash(npm run dev:*)"
     ],
     "deny": []
   }
