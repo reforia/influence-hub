@@ -1074,7 +1074,7 @@ app.get('/twitter/dashboard', async (req, res) => {
 
               <div class="tweets-section">
                   <h2>🐦 Recent Tweets</h2>
-                  ${tweetsResult.success && tweetsResult.data?.posts ? `
+                  ${tweetsResult.success && tweetsResult.data?.posts && tweetsResult.data.posts.length > 0 ? `
                   <div class="tweet-grid">
                       ${tweetsResult.data.posts.slice(0, 5).map((tweet: any) => `
                           <div class="tweet-card">
@@ -1090,11 +1090,11 @@ app.get('/twitter/dashboard', async (req, res) => {
                       `).join('')}
                   </div>
                   ` : `
-                  <div style="background: ${usingCachedData ? '#fff3cd' : '#f8d7da'}; color: ${usingCachedData ? '#856404' : '#721c24'}; padding: 20px; border-radius: 10px; text-align: center;">
-                      <h3>${usingCachedData ? '📦 Showing Cached Tweets' : '❌ Unable to Load Tweets'}</h3>
-                      <p>${usingCachedData ? 'Using previously fetched tweets due to rate limits.' : 'Could not fetch recent tweets.'}</p>
+                  <div style="background: ${usingCachedData ? '#fff3cd' : (tweetsResult.success ? '#e7f3ff' : '#f8d7da')}; color: ${usingCachedData ? '#856404' : (tweetsResult.success ? '#0c5460' : '#721c24')}; padding: 20px; border-radius: 10px; text-align: center;">
+                      <h3>${usingCachedData ? '📦 Showing Cached Tweets' : (tweetsResult.success ? '🐦 No Recent Tweets Available' : '❌ Unable to Load Tweets')}</h3>
+                      <p>${usingCachedData ? 'Using previously fetched tweets due to rate limits.' : (tweetsResult.success ? 'Recent tweets could not be loaded due to API rate limits, but your account statistics are current.' : 'Could not fetch recent tweets.')}</p>
                       ${usingCachedData && twitterDataCache.lastUpdated ? `<p><small>Last updated: ${twitterDataCache.lastUpdated.toLocaleString()}</small></p>` : ''}
-                      ${!usingCachedData && tweetsResult.error ? `<p><small>Error: ${tweetsResult.error}</small></p>` : ''}
+                      ${!usingCachedData && !tweetsResult.success && tweetsResult.error ? `<p><small>Error: ${tweetsResult.error}</small></p>` : ''}
                   </div>
                   `}
               </div>

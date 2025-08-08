@@ -34,6 +34,7 @@ export interface TrendingInsights {
 export class AnalyticsAggregator {
   private connectors: Map<SupportedPlatform, BaseConnector> = new Map();
   private cache: Map<string, { data: any; timestamp: Date; ttl: number }> = new Map();
+  private twitterCache: { data: AnalyticsData | null; timestamp: Date | null } = { data: null, timestamp: null };
 
   public addConnector(platform: SupportedPlatform, connector: BaseConnector): void {
     this.connectors.set(platform, connector);
@@ -46,10 +47,13 @@ export class AnalyticsAggregator {
   public async aggregateAllMetrics(timeRange = '7'): Promise<ApiResponse<AggregatedMetrics>> {
     try {
       const cacheKey = `metrics-${timeRange}-${Array.from(this.connectors.keys()).join(',')}`;
-      const cached = this.getCached(cacheKey, 300000);
+      const cached = this.getCached(cacheKey, 120000); // Reduced to 2 minutes for faster updates
       if (cached) {
+        console.log('📦 Returning cached analytics data');
         return { success: true, data: cached };
       }
+      
+      console.log('🔄 Fetching fresh analytics data from all platforms...');
 
       const platformData: Record<SupportedPlatform, AnalyticsData> = {} as Record<SupportedPlatform, AnalyticsData>;
       const allTrends: TrendData[] = [];
@@ -61,31 +65,105 @@ export class AnalyticsAggregator {
       let totalEngagementRates = 0;
       let validPlatforms = 0;
 
-      for (const [platform, connector] of this.connectors) {
+      // Create parallel promises for all platforms
+      const platformPromises = Array.from(this.connectors.entries()).map(async ([platform, connector]) => {
         try {
-          const analyticsResponse = await connector.fetchAnalytics(timeRange);
-          if (analyticsResponse.success && analyticsResponse.data) {
-            platformData[platform] = analyticsResponse.data;
-            const metrics = analyticsResponse.data.metrics;
-            
-            totalFollowers += metrics.followers || 0;
-            totalLikes += metrics.likes || 0;
-            totalShares += metrics.shares || 0;
-            totalComments += metrics.comments || 0;
-            totalViews += metrics.views || 0;
-            
-            if (metrics.engagement_rate !== undefined) {
-              totalEngagementRates += metrics.engagement_rate;
-              validPlatforms++;
+          let analyticsResponse: ApiResponse<AnalyticsData>;
+          let trendsResponse: ApiResponse<any> = { success: false, error: 'Skipped' };
+          
+          // Handle Twitter specially to avoid rate limits
+          if (platform === 'twitter') {
+            try {
+              console.log('🐦 Aggregator attempting Twitter analytics...');
+              analyticsResponse = await connector.fetchAnalytics(timeRange);
+              if (analyticsResponse.success && analyticsResponse.data) {
+                // Cache successful Twitter data
+                this.twitterCache.data = analyticsResponse.data;
+                this.twitterCache.timestamp = new Date();
+                console.log('✅ Twitter analytics cached by aggregator');
+              }
+            } catch (error: any) {
+              console.log('⚠️ Twitter analytics failed in aggregator, using cached data...');
+              if (this.twitterCache.data) {
+                analyticsResponse = { success: true, data: this.twitterCache.data };
+                console.log(`📦 Using cached Twitter data from ${this.twitterCache.timestamp?.toLocaleString()}`);
+              } else {
+                analyticsResponse = { success: false, error: error.message };
+                console.log('❌ No cached Twitter data available');
+              }
             }
+            // Skip trends for Twitter to avoid additional API calls
+          } else {
+            // For non-Twitter platforms, fetch both analytics and trends in parallel
+            const [analytics, trends] = await Promise.all([
+              connector.fetchAnalytics(timeRange),
+              connector.fetchTrendingTopics(10)
+            ]);
+            analyticsResponse = analytics;
+            trendsResponse = trends;
           }
-
-          const trendsResponse = await connector.fetchTrendingTopics(10);
-          if (trendsResponse.success && trendsResponse.data) {
-            allTrends.push(...trendsResponse.data);
-          }
+          
+          return { platform, analyticsResponse, trendsResponse };
         } catch (error) {
           console.warn(`Failed to fetch data from ${platform}:`, error);
+          return { 
+            platform, 
+            analyticsResponse: { success: false, error: (error as Error).message },
+            trendsResponse: { success: false, error: 'Failed' }
+          };
+        }
+      });
+
+      // Execute all platform calls in parallel with 8-second timeout
+      const results = await Promise.allSettled(
+        platformPromises.map(p => 
+          Promise.race([
+            p,
+            new Promise<any>((_, reject) => 
+              setTimeout(() => reject(new Error('Platform timeout')), 8000)
+            )
+          ])
+        )
+      );
+
+      // Process results
+      for (const settledResult of results) {
+        try {
+          if (settledResult.status === 'fulfilled') {
+            const { platform, analyticsResponse, trendsResponse } = settledResult.value;
+            
+            if (platform === 'twitter') {
+              console.log(`🐦 Aggregator processing Twitter data:`, {
+                success: analyticsResponse.success,
+                hasData: !!analyticsResponse.data,
+                error: analyticsResponse.error
+              });
+            }
+            
+            if (analyticsResponse.success && analyticsResponse.data) {
+              platformData[platform as SupportedPlatform] = analyticsResponse.data;
+              const metrics = analyticsResponse.data.metrics;
+              
+              totalFollowers += metrics.followers || 0;
+              totalLikes += metrics.likes || 0;
+              totalShares += metrics.shares || 0;
+              totalComments += metrics.comments || 0;
+              totalViews += metrics.views || 0;
+              
+              if (metrics.engagement_rate !== undefined) {
+                totalEngagementRates += metrics.engagement_rate;
+                validPlatforms++;
+              }
+            }
+
+            if (trendsResponse.success && trendsResponse.data) {
+              allTrends.push(...trendsResponse.data);
+            }
+          } else {
+            console.warn('Platform call failed:', settledResult.reason);
+          }
+        } catch (error) {
+          console.warn('Error processing platform result:', error);
         }
       }
 
