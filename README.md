@@ -39,13 +39,12 @@ npm run mcp
 
 ## Supported Platforms
 
-- Facebook/Meta API
 - YouTube Data API
 - Twitter/X API
 - Reddit API
-- TikTok API
-- Instagram Basic Display API
-- Discord API
+- Facebook/Meta API (WIP)
+- TikTok API (WIP)
+- Discord API (WIP)
 
 ## Architecture
 
