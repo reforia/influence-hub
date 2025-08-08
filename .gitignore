@@ -52,6 +52,18 @@ secrets/
 *.key
 *.pem
 credentials.json
+server.log
+headers.txt
+
+# Test and debug files
+tests/
+debug-*.js
+test-*.js
+minimal-test.js
+isolate-issue.js
+verify-setup.js
+simple-tweet-test.js
+fixed-server.js
 
 # Database
 *.db

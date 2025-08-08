@@ -74,11 +74,16 @@ export class YouTubeOAuthConnector extends BaseConnector {
 
   async validateCredentials(): Promise<boolean> {
     try {
-      // Try to get channel information
-      const response = await this.youtube.channels.list({
-        part: ['id', 'snippet'],
-        mine: true
-      });
+      // Try to get channel information with timeout
+      const response = await Promise.race([
+        this.youtube.channels.list({
+          part: ['id', 'snippet'],
+          mine: true
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Validation timeout')), 10000)
+        )
+      ]) as any;
       
       return response.data.items && response.data.items.length > 0;
     } catch (error) {
@@ -87,67 +92,74 @@ export class YouTubeOAuthConnector extends BaseConnector {
     }
   }
 
-  async fetchAnalytics(timeRange = '28'): Promise<ApiResponse<AnalyticsData>> {
+  async fetchAnalytics(timeRange = '365'): Promise<ApiResponse<AnalyticsData>> {
     try {
+      console.log('🎥 YouTube OAuth fetchAnalytics started');
       // Get channel info
+      console.log('🎥 Fetching channel info...');
       const channelResponse = await this.youtube.channels.list({
         part: ['id', 'snippet', 'statistics'],
         mine: true
       });
 
       if (!channelResponse.data.items || channelResponse.data.items.length === 0) {
+        console.log('🎥 No channel found in response');
         return { success: false, error: 'No channel found' };
       }
+
+      console.log(`🎥 Found channel with ${channelResponse.data.items[0].statistics?.viewCount} total views`);
 
       const channel = channelResponse.data.items[0];
       const stats = channel.statistics;
 
-      // Get recent videos
-      const searchResponse = await this.youtube.search.list({
-        part: ['id', 'snippet'],
-        forMine: true,
-        type: 'video',
-        order: 'date',
-        maxResults: 50,
-        publishedAfter: new Date(Date.now() - parseInt(timeRange) * 24 * 60 * 60 * 1000).toISOString()
-      });
-
+      // Get uploaded videos and filter by timeRange
+      console.log(`🎥 Fetching videos for timeRange: ${timeRange} days...`);
+      const uploadsResult = await this.getUploadedVideos(50);
+      
       const videos = [];
-      if (searchResponse.data.items) {
-        // Get detailed video statistics
-        const videoIds = searchResponse.data.items.map((item: any) => item.id.videoId);
+      if (uploadsResult.success && uploadsResult.data) {
+        console.log(`🎥 Found ${uploadsResult.data.length} total videos`);
         
-        if (videoIds.length > 0) {
-          const videoDetails = await this.youtube.videos.list({
-            part: ['statistics', 'snippet'],
-            id: videoIds.join(',')
-          });
-
-          if (videoDetails.data.items) {
-            videos.push(...videoDetails.data.items.map((video: any) => ({
-              id: video.id,
-              content: video.snippet.title,
-              timestamp: new Date(video.snippet.publishedAt),
-              metrics: {
-                likes: parseInt(video.statistics.likeCount || '0'),
-                comments: parseInt(video.statistics.commentCount || '0'),
-                views: parseInt(video.statistics.viewCount || '0'),
-                shares: 0 // YouTube doesn't provide share count directly
-              },
-              engagement_rate: this.calculateEngagementRate(video.statistics),
-              url: `https://youtube.com/watch?v=${video.id}`,
-              thumbnail: video.snippet.thumbnails?.medium?.url
-            })));
-          }
-        }
+        // Filter videos by timeRange
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - parseInt(timeRange));
+        
+        const filteredVideos = uploadsResult.data.filter((video: any) => 
+          new Date(video.publishedAt) >= cutoffDate
+        );
+        
+        console.log(`🎥 Using ${filteredVideos.length} videos from last ${timeRange} days (filtered from ${uploadsResult.data.length} total)`);
+        
+        // Convert to analytics format
+        videos.push(...filteredVideos.map((video: any) => ({
+          id: video.id,
+          content: video.title,
+          timestamp: new Date(video.publishedAt),
+          metrics: {
+            likes: video.statistics.likeCount,
+            comments: video.statistics.commentCount,
+            views: video.statistics.viewCount,
+            shares: 0
+          },
+          engagement_rate: video.engagementRate,
+          url: video.url,
+          thumbnail: video.thumbnails?.medium?.url
+        })));
       }
 
+      // Calculate totals from video data if channel stats are 0 or unreliable
+      const calculatedViews = videos.reduce((sum, v) => sum + v.metrics.views, 0);
+      const channelViews = parseInt(stats.viewCount || '0');
+      const finalViews = Math.max(channelViews, calculatedViews);
+      
+      console.log(`🎥 Views calculation: channel=${channelViews}, calculated=${calculatedViews}, final=${finalViews}`);
+      
       const analyticsData: AnalyticsData = {
         platform: 'youtube',
         timestamp: new Date(),
         metrics: {
           followers: parseInt(stats.subscriberCount || '0'),
-          views: parseInt(stats.viewCount || '0'),
+          views: finalViews, // Use whichever is higher
           likes: videos.reduce((sum, v) => sum + v.metrics.likes, 0),
           comments: videos.reduce((sum, v) => sum + v.metrics.comments, 0),
           engagement_rate: videos.length > 0 ? 
@@ -158,7 +170,8 @@ export class YouTubeOAuthConnector extends BaseConnector {
 
       return { success: true, data: analyticsData };
     } catch (error: any) {
-      console.error('YouTube analytics fetch error:', error.message);
+      console.error('🎥 YouTube analytics fetch error:', error.message);
+      console.error('🎥 Full error:', error);
       return { success: false, error: error.message };
     }
   }

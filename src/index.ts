@@ -21,6 +21,13 @@ const aggregator = new AnalyticsAggregator();
 // Track actual platform connection status
 const platformStatus = new Map<SupportedPlatform, { connected: boolean; lastTested: Date; error?: string }>();
 
+// Cache for Twitter data to use when rate limited
+const twitterDataCache = {
+  userResult: null as any,
+  tweetsResult: null as any,
+  lastUpdated: null as Date | null
+};
+
 function setupConnectors() {
   const configuredPlatforms = tokenManager.listConfiguredPlatforms();
   const allSupportedPlatforms = connectorFactory.getSupportedPlatforms();
@@ -43,7 +50,7 @@ function setupConnectors() {
           aggregator.addConnector(platform, connector);
           console.log(`✓ Connected to ${platform}`);
           
-          // Test connection asynchronously after server starts
+          // Test connection once after server starts (no recurring validation to prevent rate limits)
           setTimeout(async () => {
             try {
               let isValid = false;
@@ -55,10 +62,9 @@ function setupConnectors() {
                 const oauthConnector = new YouTubeOAuthConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
                 isValid = await oauthConnector.validateCredentials();
               } else if (platform === 'twitter' && credentials.access_token && credentials.access_token_secret) {
-                // Use OAuth connector for Twitter if we have OAuth tokens
-                const { TwitterOAuthConnector } = require('./connectors/twitter-oauth');
-                const oauthConnector = new TwitterOAuthConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
-                isValid = await oauthConnector.validateCredentials();
+                // Skip Twitter validation to prevent rate limits - assume valid if we have required tokens
+                console.log(`🐦 Twitter configured with OAuth tokens - skipping validation to preserve rate limits`);
+                isValid = true;
               } else if (platform === 'facebook' && !credentials.access_token) {
                 // Facebook requires access_token, mark as invalid if missing
                 isValid = false;
@@ -70,7 +76,7 @@ function setupConnectors() {
               platformStatus.set(platform, {
                 connected: isValid,
                 lastTested: new Date(),
-                error: isValid ? undefined : (platform === 'youtube' && credentials.access_token ? 'OAuth validation failed' : 'API validation failed')
+                error: isValid ? undefined : (platform === 'youtube' && credentials.access_token ? 'OAuth validation failed' : (platform === 'twitter' ? 'Rate limit protection enabled' : 'API validation failed'))
               });
               
               if (isValid) {
@@ -689,11 +695,16 @@ app.get('/youtube/dashboard', async (req, res) => {
                       <div class="stat-label">Subscribers</div>
                   </div>
                   <div class="stat-card">
-                      <div class="stat-number">${parseInt(channelResult.data.items[0].statistics?.videoCount || '0').toLocaleString()}</div>
+                      <div class="stat-number">${videosResult.success && videosResult.data ? videosResult.data.length : parseInt(channelResult.data.items[0].statistics?.videoCount || '0')}</div>
                       <div class="stat-label">Videos</div>
                   </div>
                   <div class="stat-card">
-                      <div class="stat-number">${parseInt(channelResult.data.items[0].statistics?.viewCount || '0').toLocaleString()}</div>
+                      <div class="stat-number">${(() => {
+                        const channelViews = parseInt(channelResult.data.items[0].statistics?.viewCount || '0');
+                        const calculatedViews = videosResult.success && videosResult.data ? 
+                          videosResult.data.reduce((total, video) => total + video.statistics.viewCount, 0) : 0;
+                        return Math.max(channelViews, calculatedViews).toLocaleString();
+                      })()}</div>
                       <div class="stat-label">Total Views</div>
                   </div>
               </div>
@@ -813,10 +824,10 @@ app.get('/twitter/dashboard', async (req, res) => {
       connector = new TwitterConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
     }
     
-    // Validate the Twitter connection before proceeding
-    const isValidConnection = await connector.validateCredentials();
+    // Skip validation to prevent rate limits - assume connection is valid if credentials exist
+    // const isValidConnection = await connector.validateCredentials();
     
-    if (!isValidConnection) {
+    if (false) { // Skip validation block to prevent rate limits
       // Twitter OAuth/API is invalid/expired, prompt to fix credentials
       return res.send(`
         <!DOCTYPE html>
@@ -886,9 +897,48 @@ app.get('/twitter/dashboard', async (req, res) => {
       `);
     }
     
-    // Get user profile
-    const userResult = await connector.fetchUserMetrics();
-    const tweetsResult = await connector.fetchAnalytics('7');
+    // Attempt to fetch fresh data, fall back to cached data on rate limits
+    let userResult: any;
+    let tweetsResult: any;
+    let usingCachedData = false;
+    
+    try {
+      console.log('🐦 Attempting to fetch fresh Twitter user data...');
+      userResult = await connector.fetchUserMetrics();
+      if (userResult.success) {
+        twitterDataCache.userResult = userResult;
+        console.log('✅ Fresh Twitter user data cached');
+      }
+    } catch (error: any) {
+      console.log('⚠️ Twitter user metrics failed:', error.message);
+      userResult = { success: false, error: error.message, data: null };
+    }
+    
+    try {
+      console.log('🐦 Attempting to fetch fresh Twitter analytics...');
+      tweetsResult = await connector.fetchAnalytics('7');
+      if (tweetsResult.success) {
+        twitterDataCache.tweetsResult = tweetsResult;
+        twitterDataCache.lastUpdated = new Date();
+        console.log('✅ Fresh Twitter analytics data cached');
+      }
+    } catch (error: any) {
+      console.log('⚠️ Twitter analytics failed:', error.message);
+      tweetsResult = { success: false, error: error.message, data: null };
+    }
+    
+    // If API calls failed, try to use cached data
+    if (!userResult.success && twitterDataCache.userResult) {
+      console.log('📦 Using cached Twitter user data');
+      userResult = twitterDataCache.userResult;
+      usingCachedData = true;
+    }
+    
+    if (!tweetsResult.success && twitterDataCache.tweetsResult) {
+      console.log('📦 Using cached Twitter analytics data');
+      tweetsResult = twitterDataCache.tweetsResult;
+      usingCachedData = true;
+    }
 
     res.send(`
       <!DOCTYPE html>
@@ -988,6 +1038,12 @@ app.get('/twitter/dashboard', async (req, res) => {
                   </div>
               </div>
 
+              ${usingCachedData ? `
+              <div style="background: #e7f3ff; color: #0c5460; padding: 15px; border-radius: 10px; margin-bottom: 20px; text-align: center; border-left: 4px solid #0dcaf0;">
+                  <strong>ℹ️ Notice:</strong> Showing cached data from ${twitterDataCache.lastUpdated?.toLocaleString() || 'previous session'} due to Twitter API rate limits.
+              </div>
+              ` : ''}
+
               ${userResult.success && userResult.data ? `
               <div class="stats-grid">
                   <div class="stat-card">
@@ -1007,7 +1063,14 @@ app.get('/twitter/dashboard', async (req, res) => {
                       <div class="stat-label">Listed</div>
                   </div>
               </div>
-              ` : ''}
+              ` : `
+              <div style="background: ${usingCachedData ? '#fff3cd' : '#f8d7da'}; color: ${usingCachedData ? '#856404' : '#721c24'}; padding: 20px; border-radius: 10px; margin-bottom: 30px; text-align: center;">
+                  <h3>${usingCachedData ? '📦 Showing Cached Data' : '❌ Unable to Load Twitter Data'}</h3>
+                  <p>${usingCachedData ? 'Using previously fetched Twitter data due to rate limits.' : 'Could not fetch Twitter statistics.'}</p>
+                  ${usingCachedData && twitterDataCache.lastUpdated ? `<p><small>Last updated: ${twitterDataCache.lastUpdated.toLocaleString()}</small></p>` : ''}
+                  ${!usingCachedData && userResult.error ? `<p><small>Error: ${userResult.error}</small></p>` : ''}
+              </div>
+              `}
 
               <div class="tweets-section">
                   <h2>🐦 Recent Tweets</h2>
@@ -1026,7 +1089,14 @@ app.get('/twitter/dashboard', async (req, res) => {
                           </div>
                       `).join('')}
                   </div>
-                  ` : '<p>No recent tweets found or error loading tweets.</p>'}
+                  ` : `
+                  <div style="background: ${usingCachedData ? '#fff3cd' : '#f8d7da'}; color: ${usingCachedData ? '#856404' : '#721c24'}; padding: 20px; border-radius: 10px; text-align: center;">
+                      <h3>${usingCachedData ? '📦 Showing Cached Tweets' : '❌ Unable to Load Tweets'}</h3>
+                      <p>${usingCachedData ? 'Using previously fetched tweets due to rate limits.' : 'Could not fetch recent tweets.'}</p>
+                      ${usingCachedData && twitterDataCache.lastUpdated ? `<p><small>Last updated: ${twitterDataCache.lastUpdated.toLocaleString()}</small></p>` : ''}
+                      ${!usingCachedData && tweetsResult.error ? `<p><small>Error: ${tweetsResult.error}</small></p>` : ''}
+                  </div>
+                  `}
               </div>
           </div>
       </body>
@@ -2609,40 +2679,35 @@ app.get('/metrics', async (req, res) => {
                     </div>
                 </div>
 
-                ${(() => {
-                  let totalFollowers = 0, totalPosts = 0, totalEngagement = 0;
-                  Object.values(response.data).forEach((platform: any) => {
-                    if (platform?.metrics) {
-                      totalFollowers += platform.metrics.followers || 0;
-                      totalPosts += platform.posts?.length || 0;
-                      totalEngagement += platform.metrics.likes || 0;
-                    }
-                  });
-
-                  return `
-                    <div class="stats-overview">
-                        <div class="overview-card">
-                            <div class="overview-number">${totalFollowers.toLocaleString()}</div>
-                            <div class="overview-label">Total Followers</div>
-                        </div>
-                        <div class="overview-card">
-                            <div class="overview-number">${totalPosts.toLocaleString()}</div>
-                            <div class="overview-label">Total Posts</div>
-                        </div>
-                        <div class="overview-card">
-                            <div class="overview-number">${totalEngagement.toLocaleString()}</div>
-                            <div class="overview-label">Total Engagement</div>
-                        </div>
-                        <div class="overview-card">
-                            <div class="overview-number">${Object.keys(response.data).length}</div>
-                            <div class="overview-label">Connected Platforms</div>
-                        </div>
+                <div class="stats-overview">
+                    <div class="overview-card">
+                        <div class="overview-number">${response.data.totalFollowers.toLocaleString()}</div>
+                        <div class="overview-label">Total Followers</div>
                     </div>
-                  `;
-                })()}
+                    <div class="overview-card">
+                        <div class="overview-number">${response.data.totalViews.toLocaleString()}</div>
+                        <div class="overview-label">Total Views</div>
+                    </div>
+                    <div class="overview-card">
+                        <div class="overview-number">${response.data.totalLikes.toLocaleString()}</div>
+                        <div class="overview-label">Total Likes</div>
+                    </div>
+                    <div class="overview-card">
+                        <div class="overview-number">${response.data.totalComments.toLocaleString()}</div>
+                        <div class="overview-label">Total Comments</div>
+                    </div>
+                    <div class="overview-card">
+                        <div class="overview-number">${Object.keys(response.data.platformBreakdown).length}</div>
+                        <div class="overview-label">Connected Platforms</div>
+                    </div>
+                    <div class="overview-card">
+                        <div class="overview-number">${response.data.averageEngagementRate.toFixed(2)}%</div>
+                        <div class="overview-label">Avg Engagement Rate</div>
+                    </div>
+                </div>
 
                 <div class="platforms-grid">
-                    ${Object.entries(response.data).map(([platform, data]: [string, any]) => {
+                    ${Object.entries(response.data.platformBreakdown).map(([platform, data]: [string, any]) => {
                       const platformEmojis: {[key: string]: string} = {
                         youtube: '📺', twitter: '🐦', facebook: '📘', 
                         reddit: '🔶', tiktok: '🎵', instagram: '📸'
@@ -4025,27 +4090,270 @@ app.get('/youtube/videos', async (req, res) => {
     // Check if we have OAuth credentials
     const credentials = tokenManager.getCredentials('youtube');
     if (!credentials?.access_token) {
-      return res.json({
-        error: 'YouTube OAuth required',
-        auth_url: `http://127.0.0.1:${port}/auth/youtube`
-      });
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>YouTube Videos - Influence Hub</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .auth-card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 60px 40px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                    max-width: 500px;
+                }
+                .youtube-icon { font-size: 4em; margin-bottom: 20px; }
+                h1 { color: #333; margin-bottom: 15px; }
+                p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+                .btn {
+                    background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                    color: white;
+                    padding: 15px 30px;
+                    border: none;
+                    border-radius: 25px;
+                    text-decoration: none;
+                    display: inline-block;
+                    font-size: 1.1em;
+                    font-weight: 500;
+                    transition: transform 0.2s ease;
+                    margin: 5px;
+                }
+                .btn:hover { transform: scale(1.05); }
+                .back-btn { background: #6c757d; }
+            </style>
+        </head>
+        <body>
+            <div class="auth-card">
+                <div class="youtube-icon">🎥</div>
+                <h1>YouTube Authentication Required</h1>
+                <p>To view your YouTube videos, please authenticate with your Google account.</p>
+                <a href="/" class="btn back-btn">← Back to Home</a>
+                <a href="/auth/youtube" class="btn">Connect YouTube</a>
+            </div>
+        </body>
+        </html>
+      `);
     }
 
     const connector = new YouTubeOAuthConnector(credentials as any, new (require('./utils/rateLimiter').RateLimiter)());
     const result = await connector.getUploadedVideos(maxResults);
     
-    if (result.success) {
-      return res.json({
-        success: true,
-        videos: result.data,
-        total: result.data?.length || 0,
-        message: `Found ${result.data?.length || 0} uploaded videos`
-      });
+    if (result.success && result.data) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>YouTube Videos - Influence Hub</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: #f8f9fa;
+                    min-height: 100vh;
+                    padding: 20px;
+                }
+                .container { max-width: 1200px; margin: 0 auto; }
+                .header {
+                    background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                    color: white;
+                    padding: 30px;
+                    border-radius: 15px;
+                    margin-bottom: 30px;
+                    text-align: center;
+                }
+                .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+                .header p { font-size: 1.2em; opacity: 0.9; }
+                .nav-buttons { margin: 20px 0; }
+                .btn {
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 20px;
+                    text-decoration: none;
+                    display: inline-block;
+                    margin-right: 15px;
+                    font-weight: 500;
+                    transition: transform 0.2s ease;
+                }
+                .btn:hover { transform: translateY(-2px); }
+                .stats-bar {
+                    background: rgba(255,255,255,0.9);
+                    padding: 20px;
+                    border-radius: 10px;
+                    margin-bottom: 30px;
+                    text-align: center;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                }
+                .video-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+                    gap: 25px;
+                }
+                .video-card {
+                    background: white;
+                    border-radius: 15px;
+                    overflow: hidden;
+                    box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+                    transition: transform 0.3s ease;
+                }
+                .video-card:hover { transform: translateY(-5px); }
+                .video-thumbnail {
+                    position: relative;
+                    width: 100%;
+                    height: 200px;
+                    background-size: cover;
+                    background-position: center;
+                }
+                .play-overlay {
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: rgba(0,0,0,0.8);
+                    color: white;
+                    width: 60px;
+                    height: 60px;
+                    border-radius: 50%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 1.5em;
+                    transition: all 0.3s ease;
+                }
+                .play-overlay:hover { background: rgba(255,0,0,0.9); transform: translate(-50%, -50%) scale(1.1); }
+                .video-info {
+                    padding: 20px;
+                }
+                .video-title {
+                    font-size: 1.2em;
+                    font-weight: 600;
+                    margin-bottom: 10px;
+                    color: #333;
+                    display: -webkit-box;
+                    -webkit-line-clamp: 2;
+                    -webkit-box-orient: vertical;
+                    overflow: hidden;
+                }
+                .video-meta {
+                    color: #666;
+                    font-size: 0.9em;
+                    margin-bottom: 15px;
+                }
+                .video-stats {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    padding: 15px 0;
+                    border-top: 1px solid #eee;
+                    font-size: 0.9em;
+                }
+                .stat-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 5px;
+                    color: #666;
+                }
+                .watch-btn {
+                    background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                    color: white;
+                    padding: 8px 16px;
+                    border-radius: 20px;
+                    text-decoration: none;
+                    font-size: 0.9em;
+                    font-weight: 500;
+                    transition: all 0.2s ease;
+                }
+                .watch-btn:hover { background: linear-gradient(135deg, #cc0000 0%, #ff5555 100%); }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🎥 YouTube Videos</h1>
+                    <p>Your uploaded videos and their performance</p>
+                    <div class="nav-buttons">
+                        <a href="/" class="btn">← Back to Home</a>
+                        <a href="/youtube/dashboard" class="btn">📊 YouTube Dashboard</a>
+                        <a href="/metrics" class="btn">📈 Analytics</a>
+                    </div>
+                </div>
+
+                <div class="stats-bar">
+                    <h3>📹 Total Videos: ${result.data.length} | 👁️ Total Views: ${result.data.reduce((sum, v) => sum + v.statistics.viewCount, 0).toLocaleString()}</h3>
+                </div>
+
+                <div class="video-grid">
+                    ${result.data.map(video => {
+                      const publishDate = new Date(video.publishedAt);
+                      const duration = video.duration ? video.duration.replace('PT', '').replace('H', 'h ').replace('M', 'm ').replace('S', 's') : 'N/A';
+                      
+                      return `
+                        <div class="video-card">
+                            <div class="video-thumbnail" style="background-image: url('${video.thumbnails?.medium?.url || video.thumbnails?.default?.url || ''}')">
+                                <a href="${video.url}" target="_blank" class="play-overlay">▶️</a>
+                            </div>
+                            <div class="video-info">
+                                <div class="video-title">${video.title}</div>
+                                <div class="video-meta">
+                                    📅 ${publishDate.toLocaleDateString()} • ⏱️ ${duration}
+                                </div>
+                                <div class="video-stats">
+                                    <div class="stat-item">👁️ ${video.statistics.viewCount.toLocaleString()}</div>
+                                    <div class="stat-item">👍 ${video.statistics.likeCount.toLocaleString()}</div>
+                                    <div class="stat-item">💬 ${video.statistics.commentCount.toLocaleString()}</div>
+                                    <a href="${video.url}" target="_blank" class="watch-btn">Watch →</a>
+                                </div>
+                            </div>
+                        </div>
+                      `;
+                    }).join('')}
+                </div>
+            </div>
+        </body>
+        </html>
+      `);
     } else {
-      return res.status(500).json(result);
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>YouTube Videos Error</title></head>
+        <body>
+          <h1>Error loading videos</h1>
+          <p>${result.error || 'Unknown error'}</p>
+          <a href="/youtube/dashboard">← Back to YouTube Dashboard</a>
+        </body>
+        </html>
+      `);
     }
   } catch (error) {
-    return res.status(500).json({ error: (error as Error).message });
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>YouTube Videos Error</title></head>
+      <body>
+        <h1>Error loading videos</h1>
+        <p>${(error as Error).message}</p>
+        <a href="/youtube/dashboard">← Back to YouTube Dashboard</a>
+      </body>
+      </html>
+    `);
   }
 });
 

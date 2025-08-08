@@ -23,7 +23,13 @@
       "Bash(chmod:*)",
       "Bash(./start.sh:*)",
       "Bash(timeout:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(true)",
+      "Bash(http_proxy= https_proxy= curl \"http://127.0.0.1:3002/metrics\")",
+      "Bash(http_proxy= https_proxy= curl -s \"http://127.0.0.1:3002/metrics\")",
+      "Bash(http_proxy= https_proxy= curl -s \"http://127.0.0.1:3002/youtube/dashboard\")",
+      "Bash(http_proxy= https_proxy= curl -v \"http://127.0.0.1:3002/youtube/dashboard\")",
+      "Bash(http_proxy= https_proxy= curl -s \"http://127.0.0.1:3002/youtube/videos?maxResults=50\")"
     ],
     "deny": []
   }

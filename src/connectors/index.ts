@@ -1,5 +1,6 @@
 import { BaseConnector } from './base';
 import { YouTubeConnector } from './youtube';
+import { YouTubeOAuthConnector } from './youtube-oauth';
 import { TwitterConnector } from './twitter';
 import { FacebookConnector } from './facebook';
 import { RedditConnector } from './reddit';
@@ -19,6 +20,10 @@ export class ConnectorFactory {
   ): BaseConnector | null {
     switch (platform) {
       case 'youtube':
+        // Use OAuth connector if access tokens are available, otherwise use basic API key connector
+        if (credentials.access_token) {
+          return new YouTubeOAuthConnector(credentials as any, this.rateLimiter);
+        }
         return new YouTubeConnector(credentials, this.rateLimiter);
       
       case 'twitter':
@@ -52,6 +57,7 @@ export class ConnectorFactory {
 export {
   BaseConnector,
   YouTubeConnector,
+  YouTubeOAuthConnector,
   TwitterConnector,
   FacebookConnector,
   RedditConnector

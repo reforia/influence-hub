@@ -169,20 +169,10 @@ export class TwitterConnector extends BaseConnector {
       } catch (tweetsError: any) {
         console.log('⚠️ Could not fetch tweets:', tweetsError.response?.status, tweetsError.message);
         
-        // If we hit rate limits, provide mock data so the interface still works
+        // If we hit rate limits, return error instead of fake data
         if (tweetsError.response?.status === 429) {
-          console.log('✓ Using mock data due to rate limits');
-          tweets = [{
-            id: '1953456842576625924',
-            text: 'Testing a local project, tweet for API retrieval',
-            created_at: '2025-08-07T14:02:59.000Z',
-            public_metrics: {
-              like_count: 0,
-              retweet_count: 0,
-              reply_count: 0,
-              quote_count: 0
-            }
-          }];
+          console.log('✓ Twitter API rate limited - returning error');
+          return { success: false, error: 'Twitter API rate limit exceeded. Please try again later.' };
         }
       }
 

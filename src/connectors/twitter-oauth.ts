@@ -285,22 +285,9 @@ export class TwitterOAuthConnector extends BaseConnector {
     } catch (error: any) {
       console.log('⚠️ Could not fetch user data:', error.response?.status);
       
-      // If rate limited, return success with fallback data instead of failure
+      // If rate limited, return failure with clear message
       if (error.response?.status === 429) {
-        return { 
-          success: true, 
-          data: {
-            id: 'rate_limited_user',
-            name: 'Twitter User',
-            username: 'twitter_user',
-            public_metrics: {
-              followers_count: 0,
-              following_count: 0,
-              tweet_count: 0,
-              listed_count: 0
-            }
-          }
-        };
+        return { success: false, error: 'Twitter API rate limit exceeded. Please try again later.' };
       }
       
       return { success: false, error: error.message };
@@ -347,20 +334,10 @@ export class TwitterOAuthConnector extends BaseConnector {
       } catch (tweetsError: any) {
         console.log('⚠️ Could not fetch tweets:', tweetsError.response?.status, tweetsError.message);
         
-        // If we hit rate limits, provide mock data so the interface still works
+        // If we hit rate limits, return error instead of fake data
         if (tweetsError.response?.status === 429) {
-          console.log('✓ Using mock data due to rate limits');
-          tweets = [{
-            id: '1953456842576625924',
-            text: 'Testing a local project, tweet for API retrieval (OAuth)',
-            created_at: '2025-08-07T14:02:59.000Z',
-            public_metrics: {
-              like_count: 1,
-              retweet_count: 0,
-              reply_count: 0,
-              quote_count: 0
-            }
-          }];
+          console.log('✓ Twitter API rate limited - returning error');
+          return { success: false, error: 'Twitter API rate limit exceeded. Please try again later.' };
         }
       }
 
