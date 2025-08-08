@@ -83,7 +83,9 @@ export class RedditConnector extends BaseConnector {
 
   async validateCredentials(): Promise<boolean> {
     try {
+      console.log('🔶 Reddit validation - getting access token...');
       const token = await this.getAccessToken();
+      console.log('🔶 Reddit access token obtained:', !!token);
       
       const response = await this.makeRequest({
         method: 'GET',
@@ -94,8 +96,14 @@ export class RedditConnector extends BaseConnector {
         }
       });
 
+      console.log('🔶 Reddit validation response:', {
+        success: response.success,
+        error: response.error
+      });
+
       return response.success;
     } catch (error) {
+      console.error('🔶 Reddit validation exception:', error);
       return false;
     }
   }

@@ -1,26 +1,48 @@
-import { createHash, createCipher, createDecipher } from 'crypto';
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { PlatformCredentials, SupportedPlatform } from '../types';
 
 export class TokenManager {
   private readonly encryptionKey: string;
   private tokens: Map<SupportedPlatform, PlatformCredentials> = new Map();
+  private readonly credentialsFile: string;
 
   constructor(encryptionKey?: string) {
     this.encryptionKey = encryptionKey || process.env.ENCRYPTION_KEY || 'default-key-change-in-production';
+    this.credentialsFile = join(process.cwd(), 'credentials.json');
     this.loadTokensFromEnv();
+    this.loadTokensFromFile();
   }
 
   private encrypt(text: string): string {
-    const cipher = createCipher('aes-256-cbc', this.encryptionKey);
+    const iv = randomBytes(16);
+    const key = createHash('sha256').update(this.encryptionKey).digest().slice(0, 32);
+    const cipher = createCipheriv('aes-256-cbc', key, iv);
+    
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
-    return encrypted;
+    
+    // Return iv + encrypted data
+    return iv.toString('hex') + ':' + encrypted;
   }
 
-  private decrypt(encryptedText: string): string {
-    const decipher = createDecipher('aes-256-cbc', this.encryptionKey);
-    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+  private decrypt(encryptedData: string): string {
+    const parts = encryptedData.split(':');
+    if (parts.length !== 2) {
+      // Fallback for old format - just return as-is
+      return encryptedData;
+    }
+    
+    const iv = Buffer.from(parts[0], 'hex');
+    const encrypted = parts[1];
+    
+    const key = createHash('sha256').update(this.encryptionKey).digest().slice(0, 32);
+    const decipher = createDecipheriv('aes-256-cbc', key, iv);
+    
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
+    
     return decrypted;
   }
 
@@ -54,6 +76,30 @@ export class TokenManager {
     });
   }
 
+  private loadTokensFromFile(): void {
+    try {
+      if (existsSync(this.credentialsFile)) {
+        const fileContent = readFileSync(this.credentialsFile, 'utf8');
+        const savedTokens = JSON.parse(fileContent);
+        
+        Object.entries(savedTokens).forEach(([platform, credentials]) => {
+          this.tokens.set(platform as SupportedPlatform, credentials as PlatformCredentials);
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to load saved credentials:', error);
+    }
+  }
+
+  private saveTokensToFile(): void {
+    try {
+      const tokensObject = Object.fromEntries(this.tokens);
+      writeFileSync(this.credentialsFile, JSON.stringify(tokensObject, null, 2));
+    } catch (error) {
+      console.error('Failed to save credentials:', error);
+    }
+  }
+
   public setCredentials(platform: SupportedPlatform, credentials: PlatformCredentials): void {
     const encryptedCredentials: PlatformCredentials = {};
     
@@ -64,6 +110,7 @@ export class TokenManager {
     });
 
     this.tokens.set(platform, encryptedCredentials);
+    this.saveTokensToFile();
   }
 
   public getCredentials(platform: SupportedPlatform): PlatformCredentials | null {
@@ -92,6 +139,7 @@ export class TokenManager {
 
   public removeCredentials(platform: SupportedPlatform): void {
     this.tokens.delete(platform);
+    this.saveTokensToFile();
   }
 
   public listConfiguredPlatforms(): SupportedPlatform[] {

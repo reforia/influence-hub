@@ -15,7 +15,7 @@ An open-source social media analytics and insights aggregator that connects to m
 
 ```bash
 # Clone and install
-git clone https://github.com/your-username/influence-hub
+git clone https://github.com/reforia/influence-hub
 cd influence-hub
 npm install
 

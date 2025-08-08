@@ -4,7 +4,7 @@ import axios from 'axios';
 import { TokenManager } from './auth/tokenManager';
 import { ConnectorFactory } from './connectors';
 import { AnalyticsAggregator } from './analytics/aggregator';
-import { SupportedPlatform } from './types';
+import { SupportedPlatform, PlatformCredentials } from './types';
 import { YouTubeOAuthConnector } from './connectors/youtube-oauth';
 
 dotenv.config();
@@ -18,8 +18,21 @@ const tokenManager = new TokenManager();
 const connectorFactory = new ConnectorFactory();
 const aggregator = new AnalyticsAggregator();
 
+// Track actual platform connection status
+const platformStatus = new Map<SupportedPlatform, { connected: boolean; lastTested: Date; error?: string }>();
+
 function setupConnectors() {
   const configuredPlatforms = tokenManager.listConfiguredPlatforms();
+  const allSupportedPlatforms = connectorFactory.getSupportedPlatforms();
+  
+  // Initialize all platforms as disconnected
+  allSupportedPlatforms.forEach(platform => {
+    platformStatus.set(platform, {
+      connected: false,
+      lastTested: new Date(),
+      error: 'No credentials configured'
+    });
+  });
   
   configuredPlatforms.forEach(platform => {
     const credentials = tokenManager.getCredentials(platform);
@@ -33,13 +46,44 @@ function setupConnectors() {
           // Test connection asynchronously after server starts
           setTimeout(async () => {
             try {
-              const isValid = await connector.testConnection();
+              let isValid = false;
+              
+              // For platforms that require OAuth, check if we have OAuth tokens
+              if (platform === 'youtube' && credentials.access_token) {
+                // Use OAuth connector for YouTube if we have access_token
+                const { YouTubeOAuthConnector } = require('./connectors/youtube-oauth');
+                const oauthConnector = new YouTubeOAuthConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+                isValid = await oauthConnector.validateCredentials();
+              } else if (platform === 'twitter' && credentials.access_token && credentials.access_token_secret) {
+                // Use OAuth connector for Twitter if we have OAuth tokens
+                const { TwitterOAuthConnector } = require('./connectors/twitter-oauth');
+                const oauthConnector = new TwitterOAuthConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+                isValid = await oauthConnector.validateCredentials();
+              } else if (platform === 'facebook' && !credentials.access_token) {
+                // Facebook requires access_token, mark as invalid if missing
+                isValid = false;
+              } else {
+                // Use regular connector validation for API-key based platforms or when no OAuth tokens
+                isValid = await connector.testConnection();
+              }
+              
+              platformStatus.set(platform, {
+                connected: isValid,
+                lastTested: new Date(),
+                error: isValid ? undefined : (platform === 'youtube' && credentials.access_token ? 'OAuth validation failed' : 'API validation failed')
+              });
+              
               if (isValid) {
                 console.log(`✅ ${platform} API validation successful`);
               } else {
                 console.warn(`⚠️ ${platform} API validation failed`);
               }
             } catch (error) {
+              platformStatus.set(platform, {
+                connected: false,
+                lastTested: new Date(),
+                error: (error as Error).message
+              });
               console.warn(`⚠️ ${platform} API test error:`, (error as Error).message);
             }
           }, 1000);
@@ -54,6 +98,19 @@ function setupConnectors() {
 app.get('/', (req, res) => {
   const configuredPlatforms = tokenManager.listConfiguredPlatforms();
   const supportedPlatforms = connectorFactory.getSupportedPlatforms();
+  
+  // Get actual connection status for each platform
+  const getConnectionStatus = (platform: SupportedPlatform) => {
+    const status = platformStatus.get(platform);
+    if (!status) return { connected: false, status: 'Unknown', error: 'Not tested' };
+    
+    return {
+      connected: status.connected,
+      status: status.connected ? 'Connected' : 'Disconnected',
+      error: status.error,
+      lastTested: status.lastTested.toLocaleString()
+    };
+  };
   
   res.send(`
     <!DOCTYPE html>
@@ -158,12 +215,20 @@ app.get('/', (req, res) => {
                         <h3>🎥 YouTube Videos</h3>
                         <p>Access and analyze your uploaded YouTube content</p>
                         <a href="/youtube/dashboard" class="btn">YouTube Dashboard</a>
+                        ${getConnectionStatus('youtube').connected ? 
+                          '<p style="color: #28a745; margin-top: 10px;">✅ Connected via OAuth</p>' : 
+                          '<a href="/auth/youtube" class="btn" style="background: #28a745; margin-top: 10px;">Authenticate YouTube</a>'
+                        }
                     </div>
                     
                     <div class="card">
                         <h3>🐦 Twitter Analytics</h3>
                         <p>View your tweets, followers, and engagement metrics</p>
                         <a href="/twitter/dashboard" class="btn">Twitter Dashboard</a>
+                        ${getConnectionStatus('twitter').connected ? 
+                          '<p style="color: #28a745; margin-top: 10px;">✅ Connected via OAuth</p>' : 
+                          '<a href="/auth/twitter" class="btn" style="background: #28a745; margin-top: 10px;">Authenticate Twitter</a>'
+                        }
                     </div>
                     
                     ${configuredPlatforms.includes('facebook') ? `
@@ -178,6 +243,10 @@ app.get('/', (req, res) => {
                         <h3>🔶 Reddit Analytics</h3>
                         <p>View your Reddit posts, karma, and subreddit engagement</p>
                         <a href="/reddit/dashboard" class="btn">Reddit Dashboard</a>
+                        ${getConnectionStatus('reddit').connected ? 
+                          '<p style="color: #28a745; margin-top: 10px;">✅ Connected via OAuth</p>' : 
+                          '<a href="/auth/reddit" class="btn" style="background: #28a745; margin-top: 10px;">Authenticate Reddit</a>'
+                        }
                     </div>
                     
                     <div class="card">
@@ -189,7 +258,7 @@ app.get('/', (req, res) => {
                     <div class="card">
                         <h3>⚙️ Platform Settings</h3>
                         <p>Manage connected platforms and API configurations</p>
-                        <a href="/platforms" class="btn">Manage Platforms</a>
+                        <a href="/api-keys" class="btn">Manage Platforms</a>
                     </div>
                 </div>
                 
@@ -204,36 +273,37 @@ app.get('/', (req, res) => {
                     
                     <div class="status-card youtube">
                         <h4>🎯 YouTube Status</h4>
-                        <h2>${configuredPlatforms.includes('youtube') ? 'Connected' : 'Not Connected'}</h2>
-                        ${configuredPlatforms.includes('youtube') ? 
+                        <h2>${getConnectionStatus('youtube').status}</h2>
+                        ${getConnectionStatus('youtube').connected ? 
                           '<p>✅ Ready to fetch your videos</p>' : 
-                          '<p><a href="/auth/youtube" style="color:white;">Connect YouTube</a></p>'
+                          `<p>⚠️ ${getConnectionStatus('youtube').error || 'Configure API key'}</p>`
                         }
                     </div>
                     
                     <div class="status-card" style="background: linear-gradient(135deg, #1DA1F2 0%, #1A91DA 100%);">
                         <h4>🐦 Twitter Status</h4>
-                        <h2>${configuredPlatforms.includes('twitter') ? 'Connected' : 'Not Connected'}</h2>
-                        ${configuredPlatforms.includes('twitter') ? 
+                        <h2>${getConnectionStatus('twitter').status}</h2>
+                        ${getConnectionStatus('twitter').connected ? 
                           '<p>✅ Ready to fetch your tweets</p>' : 
-                          '<p>Add Twitter API credentials to .env</p>'
+                          `<p>⚠️ ${getConnectionStatus('twitter').error || 'Configure API keys'}</p>`
                         }
                     </div>
                     
-                    ${configuredPlatforms.includes('facebook') ? `
-                        <div class="status-card" style="background: linear-gradient(135deg, #4267B2 0%, #365899 100%);">
-                            <h4>📘 Facebook Status</h4>
-                            <h2>Connected</h2>
-                            <p>✅ Ready to fetch your pages</p>
-                        </div>
-                    ` : ''}
+                    <div class="status-card" style="background: linear-gradient(135deg, #4267B2 0%, #365899 100%);">
+                        <h4>📘 Facebook Status</h4>
+                        <h2>${getConnectionStatus('facebook').status}</h2>
+                        ${getConnectionStatus('facebook').connected ? 
+                          '<p>✅ Ready to fetch your pages</p>' : 
+                          `<p>⚠️ ${getConnectionStatus('facebook').error || 'Configure API keys'}</p>`
+                        }
+                    </div>
                     
                     <div class="status-card" style="background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);">
                         <h4>🔶 Reddit Status</h4>
-                        <h2>${configuredPlatforms.includes('reddit') ? 'Connected' : 'Not Connected'}</h2>
-                        ${configuredPlatforms.includes('reddit') ? 
+                        <h2>${getConnectionStatus('reddit').status}</h2>
+                        ${getConnectionStatus('reddit').connected ? 
                           '<p>✅ Ready to fetch your posts</p>' : 
-                          '<p>Add Reddit API credentials to .env</p>'
+                          `<p>⚠️ ${getConnectionStatus('reddit').error || 'Complete OAuth flow'}</p>`
                         }
                     </div>
                 </div>
@@ -243,7 +313,7 @@ app.get('/', (req, res) => {
                     <p style="margin: 10px 0;">
                         <a href="/selftest" class="btn" style="margin: 5px;">System Test</a>
                         <a href="/api/status" class="btn" style="margin: 5px;">API Status</a>
-                        <a href="https://github.com/your-username/influence-hub" class="btn" style="margin: 5px;">GitHub Repo</a>
+                        <a href="https://github.com/reforia/influence-hub" class="btn" style="margin: 5px;">GitHub Repo</a>
                     </p>
                 </div>
             </div>
@@ -283,6 +353,7 @@ app.get('/youtube/dashboard', async (req, res) => {
   const credentials = tokenManager.getCredentials('youtube');
   const authSuccess = req.query.auth === 'success';
   
+  // First check if we have basic credentials
   if (!credentials?.access_token) {
     return res.send(`
       <!DOCTYPE html>
@@ -345,6 +416,146 @@ app.get('/youtube/dashboard', async (req, res) => {
     `);
   }
 
+  // Now validate that the OAuth connection is actually working
+  try {
+    const connector = new YouTubeOAuthConnector(credentials as any, new (require('./utils/rateLimiter').RateLimiter)());
+    const isValidConnection = await connector.validateCredentials();
+    
+    if (!isValidConnection) {
+      // OAuth token is invalid/expired, prompt to re-authenticate
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>YouTube Dashboard - Influence Hub</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .auth-card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 60px 40px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                    max-width: 500px;
+                }
+                .youtube-icon { font-size: 4em; margin-bottom: 20px; }
+                h1 { color: #333; margin-bottom: 15px; }
+                p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+                .btn {
+                    background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                    color: white;
+                    padding: 15px 30px;
+                    border: none;
+                    border-radius: 25px;
+                    text-decoration: none;
+                    display: inline-block;
+                    font-size: 1.1em;
+                    font-weight: 500;
+                    transition: transform 0.2s ease;
+                }
+                .btn:hover { transform: scale(1.05); }
+                .back-btn {
+                    background: #6c757d;
+                    margin-right: 15px;
+                }
+                .warning { background: #fff3cd; color: #856404; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="auth-card">
+                <div class="youtube-icon">🎥</div>
+                <h1>YouTube Connection Expired</h1>
+                <div class="warning">
+                    Your YouTube authentication has expired or is invalid. Please re-authenticate to access your dashboard.
+                </div>
+                <p>Your previous connection to YouTube is no longer valid. This can happen when tokens expire or are revoked.</p>
+                <a href="/" class="btn back-btn">← Back to Home</a>
+                <a href="/auth/youtube" class="btn">Re-authenticate YouTube</a>
+            </div>
+        </body>
+        </html>
+      `);
+    }
+  } catch (error) {
+    // Connection test failed, prompt to re-authenticate
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>YouTube Dashboard - Influence Hub</title>
+          <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { 
+                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                  background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                  min-height: 100vh;
+                  padding: 20px;
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+              }
+              .auth-card {
+                  background: white;
+                  border-radius: 20px;
+                  padding: 60px 40px;
+                  text-align: center;
+                  box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                  max-width: 500px;
+              }
+              .youtube-icon { font-size: 4em; margin-bottom: 20px; }
+              h1 { color: #333; margin-bottom: 15px; }
+              p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+              .btn {
+                  background: linear-gradient(135deg, #ff0000 0%, #ff6b6b 100%);
+                  color: white;
+                  padding: 15px 30px;
+                  border: none;
+                  border-radius: 25px;
+                  text-decoration: none;
+                  display: inline-block;
+                  font-size: 1.1em;
+                  font-weight: 500;
+                  transition: transform 0.2s ease;
+              }
+              .btn:hover { transform: scale(1.05); }
+              .back-btn {
+                  background: #6c757d;
+                  margin-right: 15px;
+              }
+              .error { background: #f8d7da; color: #721c24; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+          </style>
+      </head>
+      <body>
+          <div class="auth-card">
+              <div class="youtube-icon">🎥</div>
+              <h1>YouTube Connection Error</h1>
+              <div class="error">
+                  Failed to connect to YouTube API. Please re-authenticate to access your dashboard.
+              </div>
+              <p>There was an error validating your YouTube connection: ${(error as Error).message}</p>
+              <a href="/" class="btn back-btn">← Back to Home</a>
+              <a href="/auth/youtube" class="btn">Re-authenticate YouTube</a>
+          </div>
+      </body>
+      </html>
+    `);
+  }
+
+  
+  // If we reach here, OAuth connection is valid - proceed with dashboard
   try {
     const connector = new YouTubeOAuthConnector(credentials as any, new (require('./utils/rateLimiter').RateLimiter)());
     const videosResult = await connector.getUploadedVideos(10);
@@ -590,7 +801,90 @@ app.get('/twitter/dashboard', async (req, res) => {
 
   try {
     const { TwitterConnector } = require('./connectors/twitter');
-    const connector = new TwitterConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    let connector;
+    let isOAuth = false;
+    
+    // Use OAuth connector if we have OAuth tokens, otherwise fall back to regular connector
+    if (credentials.access_token && credentials.access_token_secret) {
+      const { TwitterOAuthConnector } = require('./connectors/twitter-oauth');
+      connector = new TwitterOAuthConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+      isOAuth = true;
+    } else {
+      connector = new TwitterConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    }
+    
+    // Validate the Twitter connection before proceeding
+    const isValidConnection = await connector.validateCredentials();
+    
+    if (!isValidConnection) {
+      // Twitter OAuth/API is invalid/expired, prompt to fix credentials
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Twitter Dashboard - Influence Hub</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #1DA1F2 0%, #1A91DA 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .auth-card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 60px 40px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                    max-width: 500px;
+                }
+                .twitter-icon { font-size: 4em; margin-bottom: 20px; }
+                h1 { color: #333; margin-bottom: 15px; }
+                p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+                .btn {
+                    background: linear-gradient(135deg, #1DA1F2 0%, #1A91DA 100%);
+                    color: white;
+                    padding: 15px 30px;
+                    border: none;
+                    border-radius: 25px;
+                    text-decoration: none;
+                    display: inline-block;
+                    font-size: 1.1em;
+                    font-weight: 500;
+                    transition: transform 0.2s ease;
+                }
+                .btn:hover { transform: scale(1.05); }
+                .back-btn {
+                    background: #6c757d;
+                    margin-right: 15px;
+                }
+                .warning { background: #fff3cd; color: #856404; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="auth-card">
+                <div class="twitter-icon">🐦</div>
+                <h1>Twitter Connection Invalid</h1>
+                <div class="warning">
+                    Your Twitter/X API credentials are invalid or have expired. Please ${isOAuth ? 're-authenticate' : 'check your API credentials'}.
+                </div>
+                <p>Unable to connect to Twitter API. ${isOAuth ? 'Please re-authenticate with Twitter.' : 'Please verify your bearer token and OAuth credentials in the .env file.'}</p>
+                <a href="/" class="btn back-btn">← Back to Home</a>
+                ${isOAuth ? 
+                  '<a href="/auth/twitter" class="btn">Re-authenticate Twitter</a>' : 
+                  '<a href="https://developer.twitter.com/en/portal/dashboard" target="_blank" class="btn">Twitter Developer Portal</a>'
+                }
+            </div>
+        </body>
+        </html>
+      `);
+    }
     
     // Get user profile
     const userResult = await connector.fetchUserMetrics();
@@ -763,8 +1057,16 @@ app.get('/twitter/tweets', async (req, res) => {
   }
 
   try {
-    const { TwitterConnector } = require('./connectors/twitter');
-    const connector = new TwitterConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    let connector;
+    
+    // Use OAuth connector if we have OAuth tokens, otherwise fall back to regular connector
+    if (credentials.access_token && credentials.access_token_secret) {
+      const { TwitterOAuthConnector } = require('./connectors/twitter-oauth');
+      connector = new TwitterOAuthConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    } else {
+      const { TwitterConnector } = require('./connectors/twitter');
+      connector = new TwitterConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    }
     
     const maxResults = parseInt(req.query.maxResults as string) || 20;
     const tweetsResult = await connector.fetchAnalytics('30'); // Get last 30 days
@@ -1058,6 +1360,76 @@ FACEBOOK_ACCESS_TOKEN=your_access_token</pre>
   try {
     const { FacebookConnector } = require('./connectors/facebook');
     const connector = new FacebookConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
+    
+    // Validate the Facebook OAuth connection before proceeding
+    const isValidConnection = await connector.validateCredentials();
+    
+    if (!isValidConnection) {
+      // Facebook OAuth is invalid/expired, prompt to fix credentials
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Facebook Dashboard - Influence Hub</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #4267B2 0%, #365899 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .auth-card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 60px 40px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                    max-width: 500px;
+                }
+                .facebook-icon { font-size: 4em; margin-bottom: 20px; }
+                h1 { color: #333; margin-bottom: 15px; }
+                p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+                .btn {
+                    background: linear-gradient(135deg, #4267B2 0%, #365899 100%);
+                    color: white;
+                    padding: 15px 30px;
+                    border: none;
+                    border-radius: 25px;
+                    text-decoration: none;
+                    display: inline-block;
+                    font-size: 1.1em;
+                    font-weight: 500;
+                    transition: transform 0.2s ease;
+                }
+                .btn:hover { transform: scale(1.05); }
+                .back-btn {
+                    background: #6c757d;
+                    margin-right: 15px;
+                }
+                .warning { background: #fff3cd; color: #856404; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="auth-card">
+                <div class="facebook-icon">📘</div>
+                <h1>Facebook Connection Invalid</h1>
+                <div class="warning">
+                    Your Facebook access token is invalid or has expired. Please check your credentials.
+                </div>
+                <p>Unable to connect to Facebook API. Please verify your access token and app credentials in the .env file.</p>
+                <a href="/" class="btn back-btn">← Back to Home</a>
+                <a href="https://developers.facebook.com/tools/explorer/" target="_blank" class="btn">Get New Token</a>
+            </div>
+        </body>
+        </html>
+      `);
+    }
     
     const analyticsResult = await connector.fetchAnalytics('7');
 
@@ -1731,6 +2103,76 @@ REDDIT_PASSWORD=your_reddit_password</pre>
     const { RedditConnector } = require('./connectors/reddit');
     const connector = new RedditConnector(credentials, new (require('./utils/rateLimiter').RateLimiter)());
     
+    // Validate the Reddit OAuth connection before proceeding
+    const isValidConnection = await connector.validateCredentials();
+    
+    if (!isValidConnection) {
+      // Reddit OAuth is invalid/expired, prompt to re-authenticate
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Reddit Dashboard - Influence Hub</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .auth-card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 60px 40px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                    max-width: 500px;
+                }
+                .reddit-icon { font-size: 4em; margin-bottom: 20px; }
+                h1 { color: #333; margin-bottom: 15px; }
+                p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+                .btn {
+                    background: linear-gradient(135deg, #FF4500 0%, #FF5700 100%);
+                    color: white;
+                    padding: 15px 30px;
+                    border: none;
+                    border-radius: 25px;
+                    text-decoration: none;
+                    display: inline-block;
+                    font-size: 1.1em;
+                    font-weight: 500;
+                    transition: transform 0.2s ease;
+                }
+                .btn:hover { transform: scale(1.05); }
+                .back-btn {
+                    background: #6c757d;
+                    margin-right: 15px;
+                }
+                .warning { background: #fff3cd; color: #856404; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="auth-card">
+                <div class="reddit-icon">🔶</div>
+                <h1>Reddit Connection Invalid</h1>
+                <div class="warning">
+                    Your Reddit authentication is invalid or has expired. Please check your credentials and try again.
+                </div>
+                <p>Unable to connect to Reddit API. This may be due to incorrect credentials or expired tokens.</p>
+                <a href="/" class="btn back-btn">← Back to Home</a>
+                <a href="/auth/reddit" class="btn">Re-authenticate Reddit</a>
+            </div>
+        </body>
+        </html>
+      `);
+    }
+    
     const analyticsResult = await connector.fetchAnalytics('7');
 
     res.send(`
@@ -2162,6 +2604,7 @@ app.get('/metrics', async (req, res) => {
                         <a href="/" class="nav-btn">🏠 Home</a>
                         <a href="/metrics" class="nav-btn">📊 Dashboard</a>
                         <a href="/trends" class="nav-btn">🔥 Trends</a>
+                        <a href="/api-keys" class="nav-btn">🔑 API Keys</a>
                         <a href="/settings" class="nav-btn">⚙️ Settings</a>
                     </div>
                 </div>
@@ -2417,6 +2860,7 @@ app.get('/trends', async (req, res) => {
                         <a href="/" class="nav-btn">🏠 Home</a>
                         <a href="/dashboard" class="nav-btn">📊 Dashboard</a>
                         <a href="/trends" class="nav-btn">🔥 Trends</a>
+                        <a href="/api-keys" class="nav-btn">🔑 API Keys</a>
                         <a href="/settings" class="nav-btn">⚙️ Settings</a>
                     </div>
                 </div>
@@ -2505,6 +2949,643 @@ app.get('/trends', async (req, res) => {
 
 app.get('/dashboard', (req, res) => {
   res.redirect('/metrics');
+});
+
+app.get('/api-keys', (req, res) => {
+  const configured = tokenManager.listConfiguredPlatforms();
+  
+  // Get existing credentials for form population
+  const getCredentialValues = (platform: SupportedPlatform) => {
+    const creds = tokenManager.getCredentials(platform);
+    if (!creds) return {};
+    
+    // Return actual values - we'll handle hiding them in the frontend
+    const values: Record<string, string> = {};
+    Object.entries(creds).forEach(([key, value]) => {
+      values[key] = value || '';
+    });
+    return values;
+  };
+  
+  const youtubeValues = getCredentialValues('youtube');
+  const twitterValues = getCredentialValues('twitter');
+  const redditValues = getCredentialValues('reddit');
+  const facebookValues = getCredentialValues('facebook');
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>🔑 API Keys Management - Influence Hub</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh; padding: 20px;
+            }
+            .container { max-width: 1000px; margin: 0 auto; }
+            .header {
+                text-align: center; background: rgba(255,255,255,0.95);
+                padding: 30px; border-radius: 20px; margin-bottom: 30px;
+                backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            }
+            .header h1 { font-size: 2.5rem; margin-bottom: 10px; color: #2d3748; }
+            .nav-bar {
+                display: flex; justify-content: center; gap: 15px;
+                margin-bottom: 20px; flex-wrap: wrap;
+            }
+            .nav-btn {
+                padding: 10px 20px; background: rgba(255,255,255,0.9);
+                color: #4a5568; border: none; border-radius: 25px;
+                text-decoration: none; transition: all 0.3s;
+                font-weight: 500;
+            }
+            .nav-btn:hover {
+                background: white; transform: translateY(-2px);
+                box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            }
+            .platform-forms {
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+                gap: 25px; margin-bottom: 30px;
+            }
+            .platform-card {
+                background: rgba(255,255,255,0.95); border-radius: 15px;
+                padding: 25px; backdrop-filter: blur(10px);
+                box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            }
+            .platform-header {
+                display: flex; align-items: center; justify-content: space-between;
+                margin-bottom: 20px;
+            }
+            .platform-title {
+                font-size: 1.5rem; font-weight: 600; color: #2d3748;
+                display: flex; align-items: center; gap: 10px;
+            }
+            .platform-status {
+                padding: 6px 12px; border-radius: 12px; font-size: 0.8rem;
+                font-weight: 500;
+            }
+            .status-configured { background: #c6f6d5; color: #22543d; }
+            .status-empty { background: #fed7d7; color: #c53030; }
+            .form-group {
+                margin-bottom: 15px;
+            }
+            .form-label {
+                display: block; margin-bottom: 8px; font-weight: 500;
+                color: #2d3748; font-size: 0.9rem;
+            }
+            .form-input {
+                width: 100%; padding: 12px; border: 2px solid #e2e8f0;
+                border-radius: 8px; font-size: 0.9rem; transition: all 0.3s;
+                background: white;
+            }
+            .form-input:focus {
+                outline: none; border-color: #4299e1;
+                box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1);
+            }
+            .form-input.configured {
+                background: #f0fff4; border-color: #68d391;
+            }
+            .btn {
+                padding: 12px 24px; border-radius: 8px; border: none;
+                font-weight: 500; cursor: pointer; transition: all 0.3s;
+                font-size: 0.9rem;
+            }
+            .btn-primary { background: #4299e1; color: white; }
+            .btn-primary:hover { background: #3182ce; }
+            .btn-success { background: #48bb78; color: white; }
+            .btn-success:hover { background: #38a169; }
+            .btn-danger { background: #f56565; color: white; }
+            .btn-danger:hover { background: #e53e3e; }
+            .btn-secondary { background: #e2e8f0; color: #4a5568; }
+            .btn-secondary:hover { background: #cbd5e0; }
+            .btn-group {
+                display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;
+            }
+            .help-text {
+                font-size: 0.8rem; color: #718096; margin-top: 5px;
+                line-height: 1.4;
+            }
+            .warning-box {
+                background: #fef5e7; border: 1px solid #f6ad55;
+                border-radius: 8px; padding: 15px; margin-bottom: 20px;
+                color: #744210;
+            }
+            .success-message {
+                background: #f0fff4; border: 1px solid #68d391;
+                border-radius: 8px; padding: 15px; margin-bottom: 20px;
+                color: #22543d; display: none;
+            }
+            .password-toggle {
+                position: relative;
+            }
+            .password-toggle button {
+                position: absolute; right: 10px; top: 50%;
+                transform: translateY(-50%); background: none;
+                border: none; color: #718096; cursor: pointer;
+                font-size: 0.8rem;
+            }
+        </style>
+        <script>
+            // Store original values for password fields
+            const originalValues = new Map();
+            
+            function togglePassword(fieldId) {
+                const field = document.getElementById(fieldId);
+                const btn = field.parentNode.querySelector('button');
+                
+                if (field.type === 'password') {
+                    // Show the actual value
+                    const originalValue = field.getAttribute('data-original');
+                    if (field.value === '••••••••' && originalValue) {
+                        field.value = originalValue;
+                    }
+                    field.type = 'text';
+                    btn.textContent = 'Hide';
+                } else {
+                    // Hide the value - if it's the original value, mask it
+                    const originalValue = field.getAttribute('data-original');
+                    if (originalValue && field.value === originalValue) {
+                        field.value = '••••••••';
+                    }
+                    field.type = 'password';
+                    btn.textContent = 'Show';
+                }
+            }
+            
+            // Initialize password field masking on page load
+            document.addEventListener('DOMContentLoaded', function() {
+                const passwordFields = document.querySelectorAll('input[type="password"]');
+                passwordFields.forEach(field => {
+                    // Store the original value
+                    if (field.value) {
+                        originalValues.set(field.id, field.value);
+                        // Replace with masked display
+                        field.setAttribute('data-original', field.value);
+                        field.value = '••••••••';
+                    }
+                    
+                    // When user focuses and field shows masked value, clear it for new input
+                    field.addEventListener('focus', function() {
+                        if (this.value === '••••••••' && this.type === 'password') {
+                            this.value = '';
+                            this.placeholder = 'Enter new value or leave empty to keep existing';
+                        }
+                    });
+                    
+                    // Restore masked display if field is empty when losing focus
+                    field.addEventListener('blur', function() {
+                        if (this.value === '' && this.getAttribute('data-original')) {
+                            this.value = '••••••••';
+                            this.placeholder = '';
+                        }
+                    });
+                });
+            });
+
+            function saveCredentials(platform) {
+                const form = document.getElementById(platform + '-form');
+                const formData = new FormData(form);
+                const data = Object.fromEntries(formData);
+                
+                // Handle password fields: remove empty ones and masked ones (no change)
+                Object.keys(data).forEach(key => {
+                    const field = form.querySelector(\`[name="\${key}"]\`);
+                    if (field && field.type === 'password') {
+                        // If field is empty or showing masked value, don't send it (keep existing)
+                        if (data[key] === '' || data[key] === '••••••••') {
+                            delete data[key];
+                        }
+                        // If field shows original value, send it as-is
+                    }
+                    // Also handle empty non-password sensitive fields
+                    if (data[key] === '' && (key.includes('secret') || key.includes('token') || key.includes('password'))) {
+                        delete data[key];
+                    }
+                });
+                
+                fetch('/api-keys/' + platform, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.success) {
+                        showMessage('success', platform + ' credentials saved successfully!');
+                        // Update the form inputs to show they are configured
+                        const form = document.getElementById(platform + '-form');
+                        const inputs = form.querySelectorAll('input');
+                        inputs.forEach(input => input.classList.add('configured'));
+                    } else {
+                        showMessage('error', 'Error saving credentials: ' + result.error);
+                    }
+                })
+                .catch(error => {
+                    showMessage('error', 'Network error: ' + error.message);
+                });
+            }
+
+            function testCredentials(platform) {
+                const form = document.getElementById(platform + '-form');
+                const formData = new FormData(form);
+                const data = Object.fromEntries(formData);
+                
+                // For testing, replace masked values with actual stored values
+                Object.keys(data).forEach(key => {
+                    const field = form.querySelector(\`[name="\${key}"]\`);
+                    if (field && field.type === 'password' && data[key] === '••••••••') {
+                        // Use the original stored value for testing
+                        const originalValue = field.getAttribute('data-original');
+                        if (originalValue) {
+                            data[key] = originalValue;
+                        }
+                    }
+                });
+                
+                console.log('🚀 Sending test data for ' + platform + ':', {
+                    keys: Object.keys(data),
+                    api_key: data.api_key ? data.api_key.substring(0, 10) + '...' : 'MISSING'
+                });
+                
+                fetch('/api-keys/' + platform + '/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.success) {
+                        showMessage('success', platform + ' credentials are valid!');
+                    } else {
+                        showMessage('error', 'Credentials test failed: ' + result.error);
+                    }
+                })
+                .catch(error => {
+                    showMessage('error', 'Test failed: ' + error.message);
+                });
+            }
+
+            function clearCredentials(platform) {
+                if (confirm('Are you sure you want to clear all ' + platform + ' credentials?')) {
+                    fetch('/api-keys/' + platform, { method: 'DELETE' })
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            showMessage('success', platform + ' credentials cleared!');
+                            location.reload();
+                        } else {
+                            showMessage('error', 'Error clearing credentials: ' + result.error);
+                        }
+                    });
+                }
+            }
+
+            function showMessage(type, message) {
+                const alertDiv = document.createElement('div');
+                alertDiv.className = type === 'success' ? 'success-message' : 'warning-box';
+                alertDiv.textContent = message;
+                alertDiv.style.display = 'block';
+                
+                document.querySelector('.container').insertBefore(alertDiv, document.querySelector('.platform-forms'));
+                
+                setTimeout(() => alertDiv.remove(), 5000);
+            }
+        </script>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔑 API Keys Management</h1>
+                <p>Configure your social media platform API credentials</p>
+                
+                <div class="nav-bar">
+                    <a href="/" class="nav-btn">🏠 Home</a>
+                    <a href="/metrics" class="nav-btn">📊 Dashboard</a>
+                    <a href="/trends" class="nav-btn">🔥 Trends</a>
+                    <a href="/api-keys" class="nav-btn">🔑 API Keys</a>
+                    <a href="/settings" class="nav-btn">⚙️ Settings</a>
+                </div>
+            </div>
+
+            <div class="warning-box">
+                <strong>⚠️ Security Notice:</strong> Your API keys are stored locally and encrypted. Never share these credentials or commit them to public repositories.
+            </div>
+
+            <div class="platform-forms">
+                <!-- YouTube API -->
+                <div class="platform-card">
+                    <div class="platform-header">
+                        <div class="platform-title">📺 YouTube</div>
+                        <div class="platform-status ${configured.includes('youtube') ? 'status-configured' : 'status-empty'}">
+                            ${configured.includes('youtube') ? 'Configured' : 'Not Set'}
+                        </div>
+                    </div>
+                    <form id="youtube-form">
+                        <div class="form-group">
+                            <label class="form-label">API Key *</label>
+                            <input type="text" name="api_key" class="form-input ${configured.includes('youtube') ? 'configured' : ''}" 
+                                   placeholder="AIza..." value="${youtubeValues.api_key || ''}" required>
+                            <div class="help-text">Get from Google Cloud Console → APIs & Services → Credentials</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">OAuth Client ID</label>
+                            <input type="text" name="client_id" class="form-input ${configured.includes('youtube') ? 'configured' : ''}" 
+                                   placeholder="123456789.apps.googleusercontent.com" value="${youtubeValues.client_id || ''}">
+                        </div>
+                        <div class="form-group password-toggle">
+                            <label class="form-label">OAuth Client Secret</label>
+                            <input type="password" name="client_secret" id="youtube-secret" class="form-input ${configured.includes('youtube') ? 'configured' : ''}" 
+                                   placeholder="GOCSPX-..." value="${youtubeValues.client_secret || ''}">
+                            <button type="button" onclick="togglePassword('youtube-secret')">Show</button>
+                            <div class="help-text">Required for personal data access (subscriptions, uploads)</div>
+                        </div>
+                        <div class="btn-group">
+                            <button type="button" class="btn btn-primary" onclick="saveCredentials('youtube')">Save</button>
+                            <button type="button" class="btn btn-secondary" onclick="testCredentials('youtube')">Test</button>
+                            <button type="button" class="btn btn-danger" onclick="clearCredentials('youtube')">Clear</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Twitter API -->
+                <div class="platform-card">
+                    <div class="platform-header">
+                        <div class="platform-title">🐦 Twitter/X</div>
+                        <div class="platform-status ${configured.includes('twitter') ? 'status-configured' : 'status-empty'}">
+                            ${configured.includes('twitter') ? 'Configured' : 'Not Set'}
+                        </div>
+                    </div>
+                    <form id="twitter-form">
+                        <div class="form-group">
+                            <label class="form-label">API Key *</label>
+                            <input type="text" name="api_key" class="form-input ${configured.includes('twitter') ? 'configured' : ''}" 
+                                   placeholder="Enter Twitter API Key" value="${twitterValues.api_key || ''}" required>
+                        </div>
+                        <div class="form-group password-toggle">
+                            <label class="form-label">API Secret *</label>
+                            <input type="password" name="api_secret" id="twitter-secret" class="form-input ${configured.includes('twitter') ? 'configured' : ''}" 
+                                   placeholder="Enter Twitter API Secret" value="${twitterValues.api_secret || ''}" required>
+                            <button type="button" onclick="togglePassword('twitter-secret')">Show</button>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Bearer Token</label>
+                            <input type="text" name="bearer_token" class="form-input ${configured.includes('twitter') ? 'configured' : ''}" 
+                                   placeholder="AAAAAAAAAA..." value="${twitterValues.bearer_token || ''}">
+                            <div class="help-text">For app-only authentication (public data)</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Access Token</label>
+                            <input type="text" name="access_token" class="form-input ${configured.includes('twitter') ? 'configured' : ''}" 
+                                   placeholder="123456-..." value="${twitterValues.access_token || ''}">
+                        </div>
+                        <div class="form-group password-toggle">
+                            <label class="form-label">Access Token Secret</label>
+                            <input type="password" name="access_token_secret" id="twitter-access-secret" class="form-input ${configured.includes('twitter') ? 'configured' : ''}" 
+                                   placeholder="Enter Access Token Secret" value="${twitterValues.access_token_secret || ''}">
+                            <button type="button" onclick="togglePassword('twitter-access-secret')">Show</button>
+                            <div class="help-text">Required for personal data access</div>
+                        </div>
+                        <div class="btn-group">
+                            <button type="button" class="btn btn-primary" onclick="saveCredentials('twitter')">Save</button>
+                            <button type="button" class="btn btn-secondary" onclick="testCredentials('twitter')">Test</button>
+                            <button type="button" class="btn btn-danger" onclick="clearCredentials('twitter')">Clear</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Reddit API -->
+                <div class="platform-card">
+                    <div class="platform-header">
+                        <div class="platform-title">🔶 Reddit</div>
+                        <div class="platform-status ${configured.includes('reddit') ? 'status-configured' : 'status-empty'}">
+                            ${configured.includes('reddit') ? 'Configured' : 'Not Set'}
+                        </div>
+                    </div>
+                    <form id="reddit-form">
+                        <div class="form-group">
+                            <label class="form-label">Client ID *</label>
+                            <input type="text" name="client_id" class="form-input ${configured.includes('reddit') ? 'configured' : ''}" 
+                                   placeholder="Enter Reddit Client ID" value="${redditValues.client_id || ''}" required>
+                            <div class="help-text">From Reddit App Preferences → Developed Applications</div>
+                        </div>
+                        <div class="form-group password-toggle">
+                            <label class="form-label">Client Secret *</label>
+                            <input type="password" name="client_secret" id="reddit-secret" class="form-input ${configured.includes('reddit') ? 'configured' : ''}" 
+                                   placeholder="Enter Reddit Client Secret" value="${redditValues.client_secret || ''}" required>
+                            <button type="button" onclick="togglePassword('reddit-secret')">Show</button>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Redirect URI</label>
+                            <input type="text" name="redirect_uri" class="form-input ${configured.includes('reddit') ? 'configured' : ''}" 
+                                   value="${redditValues.redirect_uri || 'http://127.0.0.1:3002/auth/reddit/callback'}" readonly>
+                            <div class="help-text">Use this exact URL in your Reddit app settings</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username (Optional)</label>
+                            <input type="text" name="username" class="form-input ${configured.includes('reddit') ? 'configured' : ''}" 
+                                   placeholder="Reddit username" value="${redditValues.username || ''}">
+                            <div class="help-text">Only needed for password-based authentication</div>
+                        </div>
+                        <div class="btn-group">
+                            <button type="button" class="btn btn-primary" onclick="saveCredentials('reddit')">Save</button>
+                            <button type="button" class="btn btn-secondary" onclick="testCredentials('reddit')">Test</button>
+                            <button type="button" class="btn btn-danger" onclick="clearCredentials('reddit')">Clear</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Facebook API -->
+                <div class="platform-card">
+                    <div class="platform-header">
+                        <div class="platform-title">📘 Facebook</div>
+                        <div class="platform-status ${configured.includes('facebook') ? 'status-configured' : 'status-empty'}">
+                            ${configured.includes('facebook') ? 'Configured' : 'Not Set'}
+                        </div>
+                    </div>
+                    <form id="facebook-form">
+                        <div class="form-group">
+                            <label class="form-label">App ID *</label>
+                            <input type="text" name="app_id" class="form-input ${configured.includes('facebook') ? 'configured' : ''}" 
+                                   placeholder="Enter Facebook App ID" value="${facebookValues.app_id || ''}" required>
+                        </div>
+                        <div class="form-group password-toggle">
+                            <label class="form-label">App Secret *</label>
+                            <input type="password" name="app_secret" id="facebook-secret" class="form-input ${configured.includes('facebook') ? 'configured' : ''}" 
+                                   placeholder="Enter Facebook App Secret" value="${facebookValues.app_secret || ''}" required>
+                            <button type="button" onclick="togglePassword('facebook-secret')">Show</button>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Access Token</label>
+                            <input type="text" name="access_token" class="form-input ${configured.includes('facebook') ? 'configured' : ''}" 
+                                   placeholder="Long-lived User Access Token" value="${facebookValues.access_token || ''}">
+                            <div class="help-text">Get from Graph API Explorer or OAuth flow</div>
+                        </div>
+                        <div class="btn-group">
+                            <button type="button" class="btn btn-primary" onclick="saveCredentials('facebook')">Save</button>
+                            <button type="button" class="btn btn-secondary" onclick="testCredentials('facebook')">Test</button>
+                            <button type="button" class="btn btn-danger" onclick="clearCredentials('facebook')">Clear</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="platform-card" style="text-align: center;">
+                <h3 style="margin-bottom: 15px;">📚 Need Help?</h3>
+                <p style="color: #718096; margin-bottom: 20px;">
+                    Check out the setup guides for each platform to get your API credentials.
+                </p>
+                <div class="btn-group" style="justify-content: center;">
+                    <a href="https://console.cloud.google.com/" target="_blank" class="btn btn-secondary">Google Cloud Console</a>
+                    <a href="https://developer.x.com/" target="_blank" class="btn btn-secondary">Twitter Developers</a>
+                    <a href="https://www.reddit.com/prefs/apps" target="_blank" class="btn btn-secondary">Reddit Apps</a>
+                    <a href="https://developers.facebook.com/" target="_blank" class="btn btn-secondary">Facebook Developers</a>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+  `);
+});
+
+// API endpoints for credential management
+app.post('/api-keys/:platform', express.json(), (req, res) => {
+  try {
+    const platform = req.params.platform as SupportedPlatform;
+    const credentials = req.body;
+    
+    // Validate platform
+    const available = connectorFactory.getAvailablePlatforms();
+    if (!available.includes(platform)) {
+      return res.status(400).json({ success: false, error: 'Unsupported platform' });
+    }
+
+    // Merge with existing credentials (keep existing values for missing fields)
+    const existingCredentials = tokenManager.getCredentials(platform) || {};
+    const mergedCredentials = { ...existingCredentials, ...credentials };
+    
+    // Save merged credentials using tokenManager
+    tokenManager.setCredentials(platform, mergedCredentials);
+    
+    return res.json({ success: true, message: `${platform} credentials saved successfully` });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+app.post('/api-keys/:platform/test', (req, res) => {
+  try {
+    const platform = req.params.platform as SupportedPlatform;
+    
+    // Use credentials from request body if provided, otherwise use saved credentials
+    let credentials = req.body && Object.keys(req.body).length > 0 
+      ? req.body as PlatformCredentials
+      : tokenManager.getCredentials(platform);
+    
+    console.log(`🧪 Testing ${platform} credentials:`, { 
+      hasCredentials: !!credentials,
+      credentialKeys: credentials ? Object.keys(credentials) : [],
+      apiKey: credentials?.api_key ? `${credentials.api_key.substring(0, 10)}...` : 'MISSING',
+      fromRequestBody: req.body && Object.keys(req.body).length > 0
+    });
+    
+    // Also log what's in .env for comparison
+    const envCredentials = tokenManager.getCredentials(platform);
+    console.log(`📁 .env ${platform} credentials:`, {
+      hasEnvCredentials: !!envCredentials,
+      envCredentialKeys: envCredentials ? Object.keys(envCredentials) : [],
+      envApiKey: envCredentials?.api_key ? `${envCredentials.api_key.substring(0, 10)}...` : 'MISSING'
+    });
+    
+    if (!credentials) {
+      return res.status(400).json({ success: false, error: 'No credentials provided for testing' });
+    }
+
+    // Create connector and test credentials
+    const connector = connectorFactory.createConnector(platform, credentials);
+    if (!connector) {
+      return res.status(400).json({ success: false, error: 'Platform connector not available' });
+    }
+
+    console.log(`🔧 Created ${platform} connector, testing...`);
+
+    // Test the credentials
+    connector.validateCredentials()
+      .then(isValid => {
+        console.log(`✅ ${platform} validation result:`, isValid);
+        if (isValid) {
+          res.json({ success: true, message: `${platform} credentials are valid` });
+        } else {
+          res.json({ success: false, error: 'Invalid credentials or API connection failed' });
+        }
+      })
+      .catch(error => {
+        console.error(`❌ ${platform} validation error:`, error);
+        res.json({ success: false, error: error.message });
+      });
+      
+    return; // Explicit return for TypeScript
+      
+  } catch (error) {
+    return res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+// Test endpoint that only uses .env credentials
+app.post('/api-keys/:platform/test-env', (req, res) => {
+  try {
+    const platform = req.params.platform as SupportedPlatform;
+    const credentials = tokenManager.getCredentials(platform);
+    
+    console.log(`🔬 Testing .env ${platform} credentials only:`, {
+      hasCredentials: !!credentials,
+      credentialKeys: credentials ? Object.keys(credentials) : [],
+      apiKey: credentials?.api_key ? `${credentials.api_key.substring(0, 10)}...` : 'MISSING'
+    });
+    
+    if (!credentials) {
+      return res.status(400).json({ success: false, error: 'No .env credentials found for this platform' });
+    }
+
+    const connector = connectorFactory.createConnector(platform, credentials);
+    if (!connector) {
+      return res.status(400).json({ success: false, error: 'Platform connector not available' });
+    }
+
+    connector.validateCredentials()
+      .then(isValid => {
+        console.log(`🔬 .env ${platform} validation result:`, isValid);
+        res.json({ 
+          success: isValid, 
+          message: isValid ? `${platform} .env credentials are valid` : 'Invalid .env credentials'
+        });
+      })
+      .catch(error => {
+        console.error(`🔬 .env ${platform} validation error:`, error);
+        res.json({ success: false, error: error.message });
+      });
+      
+    return; // Explicit return for TypeScript
+      
+  } catch (error) {
+    return res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+app.delete('/api-keys/:platform', (req, res) => {
+  try {
+    const platform = req.params.platform as SupportedPlatform;
+    
+    // Clear credentials
+    tokenManager.removeCredentials(platform);
+    
+    res.json({ success: true, message: `${platform} credentials cleared successfully` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
 });
 
 app.get('/settings', (req, res) => {
@@ -2964,6 +4045,199 @@ app.get('/youtube/videos', async (req, res) => {
       return res.status(500).json(result);
     }
   } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// Twitter OAuth endpoints
+app.get('/auth/twitter', async (req, res) => {
+  try {
+    // Check if we have Twitter OAuth credentials
+    const apiKey = process.env.TWITTER_API_KEY;
+    const apiSecret = process.env.TWITTER_API_SECRET;
+    
+    if (!apiKey || !apiSecret) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Twitter OAuth Not Configured</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #1DA1F2 0%, #1A91DA 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .error-card {
+                    background: white;
+                    border-radius: 20px;
+                    padding: 40px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+                    max-width: 600px;
+                }
+                h1 { color: #333; margin-bottom: 20px; }
+                p { color: #666; margin: 15px 0; line-height: 1.5; }
+                .btn { background: #1DA1F2; color: white; padding: 12px 24px; 
+                      text-decoration: none; border-radius: 25px; display: inline-block; margin: 10px; }
+                .code { background: #f8f9fa; padding: 15px; border-radius: 5px; 
+                       font-family: monospace; margin: 15px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="error-card">
+                <h1>🐦 Twitter OAuth Setup Required</h1>
+                <p>To enable Twitter OAuth authentication, you need to configure your Twitter API credentials.</p>
+                
+                <h3>Setup Steps:</h3>
+                <p>1. Go to the Twitter Developer Portal</p>
+                <p>2. Create a new app or use existing app</p>
+                <p>3. Add these environment variables to your .env file:</p>
+                
+                <div class="code">
+TWITTER_API_KEY=your_api_key_here<br>
+TWITTER_API_SECRET=your_api_secret_here
+                </div>
+                
+                <p>4. Restart the server</p>
+                
+                <a href="https://developer.twitter.com/en/portal/dashboard" target="_blank" class="btn">Twitter Developer Portal</a>
+                <a href="/" class="btn">← Back to Home</a>
+            </div>
+        </body>
+        </html>
+      `);
+    }
+
+    const { TwitterOAuthConnector } = require('./connectors/twitter-oauth');
+    const connector = new TwitterOAuthConnector({
+      api_key: apiKey,
+      api_secret: apiSecret
+    }, new (require('./utils/rateLimiter').RateLimiter)());
+
+    const callbackUrl = `http://127.0.0.1:${port}/auth/twitter/callback`;
+    const { authUrl } = await connector.generateAuthUrl(callbackUrl);
+    
+    // Redirect to Twitter OAuth
+    return res.redirect(authUrl);
+  } catch (error) {
+    console.error('Twitter OAuth initiation error:', error);
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>OAuth Error</title></head>
+      <body>
+        <h1>Twitter OAuth Error</h1>
+        <p>${(error as Error).message}</p>
+        <a href="/">← Back to Home</a>
+      </body>
+      </html>
+    `);
+  }
+});
+
+app.get('/auth/twitter/callback', async (req, res) => {
+  try {
+    const { oauth_token, oauth_verifier } = req.query;
+    
+    if (!oauth_token || !oauth_verifier) {
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Twitter OAuth Error</title></head>
+        <body>
+          <h1>Twitter OAuth Error</h1>
+          <p>Missing OAuth parameters. Authorization may have been denied.</p>
+          <a href="/">← Back to Home</a>
+        </body>
+        </html>
+      `);
+    }
+
+    const apiKey = process.env.TWITTER_API_KEY;
+    const apiSecret = process.env.TWITTER_API_SECRET;
+    
+    if (!apiKey || !apiSecret) {
+      return res.status(500).send('Twitter OAuth not configured');
+    }
+
+    const { TwitterOAuthConnector } = require('./connectors/twitter-oauth');
+    const connector = new TwitterOAuthConnector({
+      api_key: apiKey,
+      api_secret: apiSecret
+    }, new (require('./utils/rateLimiter').RateLimiter)());
+
+    // Exchange OAuth tokens for access tokens
+    const tokens = await connector.exchangeCodeForTokens(oauth_token as string, oauth_verifier as string);
+
+    // Store credentials
+    tokenManager.setCredentials('twitter', {
+      api_key: apiKey,
+      api_secret: apiSecret,
+      access_token: tokens.access_token,
+      access_token_secret: tokens.access_token_secret
+    });
+
+    // Test the connection
+    const oauthConnector = new TwitterOAuthConnector({
+      api_key: apiKey,
+      api_secret: apiSecret,
+      access_token: tokens.access_token,
+      access_token_secret: tokens.access_token_secret
+    }, new (require('./utils/rateLimiter').RateLimiter)());
+
+    const isValid = await oauthConnector.validateCredentials();
+    
+    if (isValid) {
+      // Replace the old connector with OAuth version
+      aggregator.removeConnector('twitter');
+      aggregator.addConnector('twitter', oauthConnector);
+      
+      // Update platform status
+      platformStatus.set('twitter', {
+        connected: true,
+        lastTested: new Date(),
+        error: undefined
+      });
+      
+      // Redirect to Twitter dashboard after successful authentication
+      return res.redirect('/twitter/dashboard?auth=success');
+    } else {
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Twitter Authentication Failed</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                       background: #f8f9fa; padding: 40px; text-align: center; }
+                .error { background: white; padding: 40px; border-radius: 10px; 
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 500px; margin: 0 auto; }
+                h1 { color: #dc3545; }
+                .btn { background: #1DA1F2; color: white; padding: 10px 20px; 
+                      text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="error">
+                <h1>❌ Authentication Failed</h1>
+                <p>Authentication was successful, but validation failed. Please try again.</p>
+                <a href="/" class="btn">← Back to Home</a>
+                <a href="/auth/twitter" class="btn">Try Again</a>
+            </div>
+        </body>
+        </html>
+      `);
+    }
+  } catch (error) {
+    console.error('Twitter OAuth callback error:', error);
     return res.status(500).json({ error: (error as Error).message });
   }
 });

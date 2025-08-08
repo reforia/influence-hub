@@ -77,10 +77,15 @@ export class FacebookConnector extends BaseConnector {
         }
       });
       
-      console.log('✓ Facebook validation successful for:', (response.data as any)?.name);
-      return response.success;
+      if (response.success) {
+        console.log('✓ Facebook validation successful for:', (response.data as any)?.name);
+        return true;
+      } else {
+        console.error('❌ Facebook validation failed:', response.error);
+        return false;
+      }
     } catch (error) {
-      console.error('Facebook validation failed:', (error as any).response?.data);
+      console.error('❌ Facebook validation exception:', (error as any).response?.data || (error as any).message);
       return false;
     }
   }

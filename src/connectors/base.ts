@@ -51,7 +51,20 @@ export abstract class BaseConnector {
 
   protected async makeRequest<T>(config: AxiosRequestConfig): Promise<ApiResponse<T>> {
     try {
+      console.log(`🌐 ${this.platform} HTTP request:`, {
+        method: config.method,
+        url: config.url,
+        hasParams: !!config.params,
+        paramKeys: config.params ? Object.keys(config.params) : []
+      });
+      
       const response = await this.httpClient.request<T>(config);
+      
+      console.log(`✅ ${this.platform} HTTP success:`, {
+        status: response.status,
+        hasData: !!response.data
+      });
+      
       const remaining = this.rateLimiter.getRemainingRequests(this.platform, this.rateLimits);
       const resetTimes = this.rateLimiter.getResetTime(this.platform);
 
@@ -64,6 +77,13 @@ export abstract class BaseConnector {
         }
       };
     } catch (error: any) {
+      console.error(`❌ ${this.platform} HTTP error:`, {
+        status: error.response?.status,
+        message: error.message,
+        url: config.url,
+        hasResponse: !!error.response
+      });
+      
       const result: ApiResponse<T> = {
         success: false,
         error: error.message || `API request failed for ${this.platform}`

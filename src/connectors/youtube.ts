@@ -34,17 +34,32 @@ export class YouTubeConnector extends BaseConnector {
   }
 
   async validateCredentials(): Promise<boolean> {
-    const response = await this.makeRequest({
-      method: 'GET',
-      url: 'https://www.googleapis.com/youtube/v3/channels',
-      params: {
-        part: 'id',
-        mine: true,
-        key: this.credentials.api_key
-      }
-    });
+    try {
+      console.log('🎥 YouTube validation - API key present:', !!this.credentials.api_key);
+      
+      // Try a simple quota-using endpoint that works with API key only
+      const response = await this.makeRequest({
+        method: 'GET',
+        url: 'https://www.googleapis.com/youtube/v3/videos',
+        params: {
+          part: 'id',
+          chart: 'mostPopular',
+          regionCode: 'US',
+          maxResults: 1,
+          key: this.credentials.api_key
+        }
+      });
 
-    return response.success;
+      console.log('🎥 YouTube API response:', {
+        success: response.success,
+        error: response.error
+      });
+
+      return response.success;
+    } catch (error) {
+      console.error('🎥 YouTube validation exception:', error);
+      return false;
+    }
   }
 
   async fetchAnalytics(timeRange = '28'): Promise<ApiResponse<AnalyticsData>> {

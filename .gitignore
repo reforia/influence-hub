@@ -51,6 +51,7 @@ temp/
 secrets/
 *.key
 *.pem
+credentials.json
 
 # Database
 *.db
