@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import dotenv from 'dotenv';
 import express from 'express';
 import axios from 'axios';

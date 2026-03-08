@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import { ApiResponse, AnalyticsData, PlatformCredentials, RateLimitConfig, SupportedPlatform } from '../types';
 import { RateLimiter } from '../utils/rateLimiter';

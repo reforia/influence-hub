@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 export interface Platform {
   id: string;
   name: string;

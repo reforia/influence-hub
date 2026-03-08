@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import { BaseConnector } from './base';
 import { YouTubeConnector } from './youtube';
 import { YouTubeOAuthConnector } from './youtube-oauth';

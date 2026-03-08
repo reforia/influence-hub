@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import { AnalyticsData, TrendData, SupportedPlatform, ApiResponse } from '../types';
 import { BaseConnector } from '../connectors/base';
 

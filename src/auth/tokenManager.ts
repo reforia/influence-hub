@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';

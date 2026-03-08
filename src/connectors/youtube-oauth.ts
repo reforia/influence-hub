@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { BaseConnector } from './base';

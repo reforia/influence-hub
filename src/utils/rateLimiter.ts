@@ -1,3 +1,4 @@
+// Copyright (c) Enigma Entertainment Co., Ltd. All Rights Reserved.
 import { RateLimitConfig } from '../types';
 
 interface RateLimitState {
